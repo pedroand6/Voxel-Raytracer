@@ -1,0 +1,120 @@
+#version 450 core
+
+// Tamanho do grupo de trabalho. 8x8 = 64 threads por grupo, um bom começo.
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// A textura de saída onde vamos desenhar.
+// O 'binding = 0' corresponde ao glBindImageTexture(0, ...).
+layout (rgba8, binding = 0) uniform writeonly image2D destTex;
+
+// UBO com os dados da câmera
+layout (std140, binding = 1) uniform Camera {
+    mat4 invProjection;
+    mat4 invView;
+    vec3 cameraPos;
+};
+
+// SSBO com os dados dos voxels
+// O 'binding = 2' corresponde ao glBindBufferBase(..., 2, ...).
+struct Voxel {
+    vec4 color; // r, g, b, tipo
+};
+
+layout (std430, binding = 2) buffer VoxelBuffer {
+    Voxel voxels[];
+};
+
+// Dimensões do nosso mundo de voxels
+const ivec3 worldSize = ivec3(64, 64, 64);
+
+// Função para obter um voxel de uma coordenada 3D
+// Retorna a cor se o voxel for sólido (alfa > 0), senão vec4(0)
+vec4 getVoxel(ivec3 coord) {
+    // Verifica se a coordenada está dentro dos limites do mundo
+    if (any(lessThan(coord, ivec3(0))) || any(greaterThanEqual(coord, worldSize))) {
+        return vec4(0.0);
+    }
+    
+    // Converte coordenada 3D para um índice 1D
+    int index = coord.x + coord.y * worldSize.x + coord.z * worldSize.x * worldSize.y;
+    
+    vec4 voxelColor = voxels[index].color;
+    if (voxelColor.a > 0.0) { // Consideramos alfa > 0 como um voxel sólido
+        return voxelColor;
+    }
+    
+    return vec4(0.0);
+}
+
+
+void main() {
+    // Coordenada do pixel para o qual este thread é responsável
+    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dims = imageSize(destTex); // Pega o tamanho da textura
+
+    // Normaliza as coordenadas do pixel para o intervalo [-1, 1]
+    float u = (float(pixel_coords.x) / float(dims.x)) * 2.0 - 1.0;
+    float v = (float(pixel_coords.y) / float(dims.y)) * 2.0 - 1.0;
+
+    // --- Geração do Raio ---
+    // Transforma as coordenadas da tela para o espaço do mundo
+    vec4 target = invProjection * vec4(u, v, 1.0, 1.0);
+    vec3 rayDir = vec3(invView * vec4(normalize(target.xyz), 0.0));
+    vec3 rayOrigin = cameraPos;
+
+    // --- Algoritmo de Travessia de Voxel (DDA Simplificado) ---
+    vec3 rayStep = sign(rayDir);
+    vec3 tDelta = abs(1.0 / rayDir);
+    // Calcula a borda inicial do voxel
+    vec3 voxelBoundary = floor(rayOrigin);
+
+    // Adiciona 1 se o raio estiver a ir na direção positiva
+    voxelBoundary += step(0.0, rayDir); 
+
+    // Calcula tMax como a distância até à próxima borda do voxel
+    vec3 tMax = (voxelBoundary - rayOrigin) / rayDir;
+
+    ivec3 mapPos = ivec3(floor(rayOrigin));
+    
+    vec4 finalColor = vec4(0.0);
+    bool hit = false;
+    
+    // Marcha pelo grid por um número máximo de passos para evitar loops infinitos
+    for (int i = 0; i < 512; i++) {
+        vec4 voxel = getVoxel(mapPos);
+        
+        // Se o voxel não for ar (alfa > 0), encontramos uma colisão!
+        if (voxel.a > 0.0) {
+            finalColor = vec4(voxel.rgb, 1.0); // Define a cor do pixel
+            hit = true;
+            break; // Sai do loop
+        }
+        
+        // Avança para o próximo voxel na direção do raio
+        if (tMax.x < tMax.y) {
+            if (tMax.x < tMax.z) {
+                mapPos.x += int(rayStep.x);
+                tMax.x += tDelta.x;
+            } else {
+                mapPos.z += int(rayStep.z);
+                tMax.z += tDelta.z;
+            }
+        } else {
+            if (tMax.y < tMax.z) {
+                mapPos.y += int(rayStep.y);
+                tMax.y += tDelta.y;
+            } else {
+                mapPos.z += int(rayStep.z);
+                tMax.z += tDelta.z;
+            }
+        }
+    }
+
+    // Se não houve colisão, use a cor da skybox
+    if (!hit) {
+        finalColor = vec4(0.5, 0.7, 1.0, 1.0); // Cor do céu (azul claro)
+    }
+    
+    // Escreve a cor final na textura de saída
+    imageStore(destTex, pixel_coords, finalColor);
+}
