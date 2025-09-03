@@ -1,9 +1,7 @@
-// Coloque estes includes no topo do seu ficheiro
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <vector>
 
-// Define as direções de movimento possíveis
 enum Camera_Movement {
     FORWARD,
     BACKWARD,
@@ -14,7 +12,7 @@ enum Camera_Movement {
 // Valores padrão da câmera
 const float YAW         = -90.0f;
 const float PITCH       =  0.0f;
-const float SPEED       =  20.5f; // Aumentei a velocidade para um mundo de 64x64
+const float SPEED       =  20.5f;
 const float SENSITIVITY =  0.1f;
 
 class Camera
@@ -43,13 +41,11 @@ public:
         updateCameraVectors();
     }
 
-    // Retorna a matriz view calculada usando os ângulos de Euler e a matriz LookAt
     glm::mat4 GetViewMatrix()
     {
         return glm::lookAt(Position, Position + Front, Up);
     }
 
-    // Processa o input do teclado
     void ProcessKeyboard(Camera_Movement direction, float deltaTime)
     {
         float velocity = MovementSpeed * deltaTime;
@@ -61,9 +57,6 @@ public:
             Position -= Right * velocity;
         if (direction == RIGHT)
             Position += Right * velocity;
-        // Para um mundo de voxels, talvez não queira voar livremente no eixo Y
-        // Se quiser um movimento "no chão", pode descomentar a linha abaixo:
-        // Position.y = 0.0f;
     }
 
     // Processa o movimento do mouse
