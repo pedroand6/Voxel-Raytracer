@@ -12,6 +12,14 @@
 
 #include <ShaderUtils.hpp>
 #include <Camera.hpp>
+#include "color.c"
+#include "voxel.cpp"
+
+#define WORLD_SIZE_X 64
+#define WORLD_SIZE_Y 64
+#define WORLD_SIZE_Z 64
+
+#define WORLD_VOLUME WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z
 
 std::string computeSrc = ShaderUtils::readShaderFile("shaders/raytracing.comp");
 std::string quadVsSrc  = ShaderUtils::readShaderFile("shaders/quad.vert");
@@ -160,38 +168,51 @@ int main(void)
 
     glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
 
-    const int WORLD_SIZE_X = 64;
-    const int WORLD_SIZE_Y = 64;
-    const int WORLD_SIZE_Z = 64;
+    std::vector<Voxel_Object> voxelData(WORLD_VOLUME);
 
-    std::vector<glm::vec4> voxelData(WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z);
+    // Lista de todos os tipos de voxels possívels
+    Voxel voxels[] = {
+        {VOX_AIR, 1.0f},       // VOX_AIR
+        {VOX_GRASS, 1.0f},     // VOX_GRASS
+        {VOX_DIRT, 1.0f},      // VOX_DIRT
+        {VOX_STONE, 1.0f},     // VOX_STONE
+        {VOX_WATER, 1.33f},    // VOX_WATER
+    };
 
-    // Teto azul
+    // Teto de água de teste
     for (int x = 0; x < WORLD_SIZE_X; ++x) {
         for (int z = 0; z < WORLD_SIZE_Z; ++z) {
             int index = x + 20 * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f); // Azul
+            voxelData[index] = VoxelObjCreate(voxels[VOX_WATER], make_color_rgba(0, 70, 255, 200), {x, 20, z}); // Azul esverdeado transparente
         }
     }
 
-    // Coluna verde
+    // Pilar de pedra branco
     for (int y = 0; y < WORLD_SIZE_Y; ++y) {
-        int index = WORLD_SIZE_X / 2 + y * WORLD_SIZE_X + WORLD_SIZE_X / 2 * WORLD_SIZE_X * WORLD_SIZE_Y;
-        voxelData[index] = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f); // Verde
+        int index = WORLD_SIZE_X / 2 + y * WORLD_SIZE_X + WORLD_SIZE_Z / 2 * WORLD_SIZE_X * WORLD_SIZE_Y;
+        voxelData[index] = VoxelObjCreate(voxels[VOX_STONE], make_color_rgba(220, 220, 220, 255), {WORLD_SIZE_X / 2, y, WORLD_SIZE_Z / 2});
     }
 
-    // Chão vermelho
+    // Parede de grama de teste
+    for (int y = 0; y < WORLD_SIZE_X; ++y) {
+        for (int z = 0; z < WORLD_SIZE_Z; ++z) {
+            int index = y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+            voxelData[index] = VoxelObjCreate(voxels[VOX_GRASS], make_color_rgba(50, 230, 50, 255), {0, y, z}); // Azul esverdeado transparente
+        }
+    }
+
+    // Chão de terra de teste
     for (int x = 0; x < WORLD_SIZE_X; ++x) {
         for (int z = 0; z < WORLD_SIZE_Z; ++z) {
-            int index = x + 0 * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // Vermelho
+            int index = x + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+            voxelData[index] = VoxelObjCreate(voxels[VOX_DIRT], make_color_rgba(215, 100, 130, 255), {x, 0, z}); // Azul esverdeado transparente
         }
     }
 
     GLuint ssbo_voxels;
     glGenBuffers(1, &ssbo_voxels);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_voxels);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, voxelData.size() * sizeof(glm::vec4), voxelData.data(), GL_STATIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, voxelData.size() * sizeof(Voxel_Object), voxelData.data(), GL_STATIC_DRAW);
 
     // Vincula o buffer ao ponto de ligação 2 (corresponderá ao binding no shader)
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssbo_voxels);
@@ -261,8 +282,13 @@ int main(void)
     glUseProgram(quadProgram);
     glUniform1i(glGetUniformLocation(quadProgram, "screenTexture"), 0);
 
+    float now, lastTime = 0.0f;
     // Dentro do seu game loop
     while (!glfwWindowShouldClose(window)) {
+        now = (float)glfwGetTime();
+        std::cout << "FPS: " << 1.0f / (now - lastTime) << "\n";
+        lastTime = now;
+        
         // Lógica do deltaTime
         float currentFrame = static_cast<float>(glfwGetTime());
         deltaTime = currentFrame - lastFrame;
