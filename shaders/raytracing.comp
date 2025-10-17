@@ -142,11 +142,13 @@ vec4 redirectRay (vec3 rayOrigin, vec3 rayDir, float refractionIndex) {
     vec3 voxelBoundary = floor(rayOrigin) + step(0.0, rayDir);
     vec3 tMax = (voxelBoundary - rayOrigin) / rayDir;
     ivec3 mapPos = ivec3(floor(rayOrigin));
+    ivec3 prevMapPos = mapPos;
 
-    int index = getVoxelIndex(mapPos);
+    vec4 finalColor = vec4(0.0);
 
     // Marchamos pelo grid (por uma distância máxima)
     for (int i = 0; i < 128; i++) {
+
         // avançamos para o próximo voxel
         if (tMax.x < tMax.y) {
             if (tMax.x < tMax.z) {
@@ -162,14 +164,40 @@ vec4 redirectRay (vec3 rayOrigin, vec3 rayDir, float refractionIndex) {
             }
         }
 
-        vec4 voxColor = getVoxelColor(mapPos);
+        vec4 voxelColor = getVoxelColor(mapPos);
 
-        if (voxColor.a > 0.0 && voxels[getVoxelIndex(mapPos)].voxel.refraction != refractionIndex ) {
-            return voxColor;
+        if (voxelColor.a > 0.0) {
+            vec3 normal = normalize(sign(vec3(prevMapPos - mapPos)));
+            if (length(normal) == 0.0) normal = vec3(0.0, 1.0, 0.0); // fallback
+
+            vec3 lightDir = normalize(vec3(0.4, 1.0, 0.4));
+            vec3 rayContact = vec3(mapPos) + normal;
+
+            // Luz ambiente
+            float ambientStrength = 0.2;
+            vec3 ambient = vec3(ambientStrength);
+
+            // Contribuição da luz direta (difusa)
+            //    max(..., 0.0) impede que faces opostas à luz fiquem com iluminação negativa
+            float diff = max(dot(normal, lightDir), 0.0);
+            vec3 diffuse = vec3(diff);
+
+            if (isInShadow(rayContact, lightDir)) {
+                diffuse = vec3(0.0); // Se estiver em sombra, anula a contribuição da luz direta
+            }
+
+            vec3 finalLight = ambient + diffuse;
+            voxelColor = vec4(voxelColor.rgb * finalLight, voxelColor.a);
         }
+
+        if (voxelColor.a > 0.0 && voxels[getVoxelIndex(mapPos)].voxel.refraction != refractionIndex ) {
+            return voxelColor;
+        }
+
+        prevMapPos = mapPos;
     }
 
-    return vec4(0.0);
+    return vec4(0.5, 0.7, 1.0, 1.0); // Cor do céu (azul claro)
 }
 
 vec4 raymarching(vec4 target, vec3 rayOrigin) {
@@ -213,8 +241,7 @@ vec4 raymarching(vec4 target, vec3 rayOrigin) {
             }
 
             vec3 finalLight = ambient + diffuse;
-            finalColor = vec4(voxelColor.rgb * finalLight, 1.0);
-
+            finalColor = vec4(voxelColor.rgb * finalLight, voxelColor.a);
             
             float refracIndex = thisVoxel.voxel.refraction;
             if(thisVoxel.voxel.refraction != 1.0) {
@@ -236,8 +263,8 @@ vec4 raymarching(vec4 target, vec3 rayOrigin) {
                 vec4 refractionColor = redirectRay(rayContact, refractDir, refracIndex);
                 vec4 reflectionColor = redirectRay(rayContact, reflectDir, refracIndex);
 
-                finalColor = mix(finalColor, reflectionColor, reflectIntensity);
-                finalColor = mix(finalColor, refractionColor, 1 - reflectIntensity); // FIXME : ADD BASE COLOR WRONG
+                vec4 lightmap = mix(refractionColor, reflectionColor, reflectIntensity);
+                finalColor = mix(lightmap, finalColor, 0.5);
             }
 
 
@@ -284,8 +311,7 @@ void main() {
     vec4 target = invProjection * vec4(u, v, 1.0, 1.0);
     vec4 finalColor = raymarching(target, cameraPos);
 
-    // Se não houve colisão, use a cor da skybox
-    if (finalColor.a == 0.0) {
+    if(finalColor.a == 0.0) {
         finalColor = vec4(0.5, 0.7, 1.0, 1.0); // Cor do céu (azul claro)
     }
 

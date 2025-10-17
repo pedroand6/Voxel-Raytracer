@@ -14,6 +14,7 @@
 #include <Camera.hpp>
 #include "color.c"
 #include "voxel.cpp"
+#include <octree.hpp>
 
 #define WORLD_SIZE_X 64
 #define WORLD_SIZE_Y 64
@@ -168,6 +169,8 @@ int main(void)
 
     glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
 
+    Octree* chunk0 = octree_create(NULL, {0,0,0}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
+
     std::vector<Voxel_Object> voxelData(WORLD_VOLUME);
 
     // Lista de todos os tipos de voxels possívels
@@ -183,7 +186,7 @@ int main(void)
     for (int x = 0; x < WORLD_SIZE_X; ++x) {
         for (int z = 0; z < WORLD_SIZE_Z; ++z) {
             int index = x + 20 * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = VoxelObjCreate(voxels[VOX_WATER], make_color_rgba(0, 70, 255, 200), {x, 20, z}); // Azul esverdeado transparente
+            voxelData[index] = VoxelObjCreate(voxels[VOX_WATER], make_color_rgba(130, 160, 255, 200), {x, 20, z}); // Azul esverdeado transparente
         }
     }
 
