@@ -1,3 +1,5 @@
+#ifndef _VOXEL_H_
+#define _VOXEL_H_
 #include <vmm/ivec3.h>
 #include <color.h>
 
@@ -9,17 +11,18 @@ Voxel_Type VOX_DIRT = 2;
 Voxel_Type VOX_STONE = 3;
 Voxel_Type VOX_WATER = 4;
 
-typedef struct _voxel {
+struct Voxel {
     Voxel_Type type;
     float refraction;
-} Voxel;
+};
 
-typedef struct _vox_obj {
+struct Voxel_Object {
     IVector3 coord;
     ColorRGBA color;
     Voxel voxel;
 
     uint32_t padding[2]; // 8 bytes
-} Voxel_Object;
+};
 
 Voxel_Object VoxelObjCreate(Voxel voxel, ColorRGBA color, IVector3 coord);
+#endif // _VOXEL_H_

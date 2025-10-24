@@ -169,7 +169,7 @@ int main(void)
 
     glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
 
-    Octree* chunk0 = octree_create(NULL, {0,0,0}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
+    //Octree* chunk0 = octree_create(NULL, {0,0,0}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
 
     std::vector<Voxel_Object> voxelData(WORLD_VOLUME);
 
