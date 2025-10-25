@@ -1,5 +1,5 @@
-#ifndef _ivec3_h
-#define _ivec3_h
+#ifndef _IVEC3_H
+#define _IVEC3_H
 
 #include <stdint.h>
 #include <stdbool.h>

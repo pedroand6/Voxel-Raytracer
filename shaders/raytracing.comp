@@ -58,8 +58,9 @@ const uint VOX_STONE = 3;
 const uint VOX_WATER = 4;
 
 struct Voxel {
-    uint type;
     float refraction;
+    float illumination;
+    float k;
 };
 
 struct VoxelObj {
@@ -67,7 +68,7 @@ struct VoxelObj {
     uint color; // uint32
     Voxel voxel;
 
-    uint padding[2];
+    float padding;
 };
 
 layout (std430, binding = 2) buffer VoxelBuffer {
@@ -244,7 +245,7 @@ vec4 raymarching(vec4 target, vec3 rayOrigin) {
             finalColor = vec4(voxelColor.rgb * finalLight, voxelColor.a);
             
             float refracIndex = thisVoxel.voxel.refraction;
-            if(thisVoxel.voxel.refraction != 1.0) {
+            if(thisVoxel.voxel.refraction != 0.0) {
                 // REFRACAO
                 vec3 refractDir = refract(normalize(rayDir), normal, 1.0 / refracIndex);
 

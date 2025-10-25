@@ -12,9 +12,12 @@
 
 #include <ShaderUtils.hpp>
 #include <Camera.hpp>
-#include "color.c"
-#include "voxel.cpp"
+#include <voxel.hpp>
 #include <octree.hpp>
+
+extern "C" {
+    #include <color.h>
+}
 
 #define WORLD_SIZE_X 64
 #define WORLD_SIZE_Y 64
@@ -175,12 +178,22 @@ int main(void)
 
     // Lista de todos os tipos de voxels possívels
     Voxel voxels[] = {
-        {VOX_AIR, 1.0f},       // VOX_AIR
-        {VOX_GRASS, 1.0f},     // VOX_GRASS
-        {VOX_DIRT, 1.0f},      // VOX_DIRT
-        {VOX_STONE, 1.0f},     // VOX_STONE
-        {VOX_WATER, 1.33f},    // VOX_WATER
+        {1.0f, 0.0f, 0.0f}, // VOX_AIR
+        {0.0f, 0.0f, 1.0f}, // VOX_GRASS
+        {0.0f, 0.0f, 1.0f}, // VOX_DIRT
+        {0.0f, 0.0f, 1.0f}, // VOX_WOOD
+        {0.0f, 0.0f, 1.0f}, // VOX_LEAVES
+        {1.33f, 0.0f, 0.4f}, // VOX_WATER
+        {0.0f, 0.0f, 1.0f}  // VOX_STONE
     };
+
+    Voxel_Type VOX_AIR = 0;
+    Voxel_Type VOX_GRASS = 1;
+    Voxel_Type VOX_DIRT = 2;
+    Voxel_Type VOX_WOOD = 3;
+    Voxel_Type VOX_LEAVES = 4;
+    Voxel_Type VOX_WATER = 5;
+    Voxel_Type VOX_STONE = 6;
 
     // Teto de água de teste
     for (int x = 0; x < WORLD_SIZE_X; ++x) {

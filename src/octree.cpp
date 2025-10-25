@@ -1,6 +1,9 @@
+extern "C" {
+    #include <vmm/ivec3.h>
+    #include <vmm/vec3.h>
+    #include <vmm/ray.h>
+}
 #include <octree.hpp>
-#include <vmm/ivec3.h>
-#include <vmm/ray.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <math.h>
@@ -15,6 +18,8 @@
 
 #define CHILDREN_COUNT 8
 
+#define LEAF_SIZE 2
+
 enum pos_in_octree {
     LEFTBOTBACK,
     LEFTBOTFRONT,
@@ -25,6 +30,12 @@ enum pos_in_octree {
     RIGHTTOPBACK,
     RIGHTTOPFRONT
 };
+
+Voxel_Object _invalid_voxel(void) {
+    Voxel_Object a = {0};
+    a.coord.y = MIN_HEIGHT;
+    return a;
+}
 
 IVector3 _get_node_size(Octree *node) {
     return ivec3_sub(node->right_top_front, node->left_bot_back);
@@ -82,84 +93,72 @@ Octree *octree_create(Octree *parent, IVector3 left_bot_back, IVector3 right_top
     return ot;
 }
 
-Voxel_Object *octree_find(Octree *tree, IVector3 coord) {
-    if(!_coord_in_space(coord, tree->left_bot_back, tree->right_top_front)) return NULL;
-    if(!tree->voxel) return NULL;
-    if(ivec3_equal_vec(tree->voxel->coord, coord)) return tree->voxel;
-    if(!tree->children) return NULL;
+Voxel_Object octree_find(Octree *tree, IVector3 coord) {
+    if(!_coord_in_space(coord, tree->left_bot_back, tree->right_top_front)) return _invalid_voxel();
+    if(ivec3_equal_vec(tree->voxel.coord, coord)) return tree->voxel;
+    if(!tree->children) return _invalid_voxel();
     IVector3 mid_points = ivec3_scalar_div(ivec3_add(tree->left_bot_back, tree->right_top_front), 2);
     int pos = _get_pos_in_octree(coord, mid_points);
     Octree *ref = tree->children[pos];
     while(true) {
-        if(!_coord_in_space(coord, ref->left_bot_back, ref->right_top_front)) return NULL;
-        if(!ref->voxel) return NULL;
-        if(ivec3_equal_vec(ref->voxel->coord, coord)) return ref->voxel;
-        if(!ref->children) return NULL;
+        if(!_coord_in_space(coord, ref->left_bot_back, ref->right_top_front)) return _invalid_voxel();
+        if(ivec3_equal_vec(ref->voxel.coord, coord)) return ref->voxel;
+        if(!ref->children) return _invalid_voxel();
         mid_points = ivec3_scalar_div(ivec3_add(ref->left_bot_back, ref->right_top_front), 2);
         pos = _get_pos_in_octree(coord, mid_points);
         ref = ref->children[pos];
     }
-    return NULL;
+    return _invalid_voxel();
 }
 
-void _create_children(Octree *tree, IVector3 mid_points) {
+int _create_children(Octree *tree, IVector3 mid_points) {
     tree->children = (Octree**)malloc(sizeof(Octree*) * CHILDREN_COUNT);
-    if(!tree->children) return; //FIXME: no err handling? :(
+    if(!tree->children) return -1;
     IVector3 min = tree->left_bot_back;
     IVector3 max = tree->right_top_front;
     IVector3 mid = ivec3_scalar_div(ivec3_add(min, max), 2);
     tree->children[LEFTBOTBACK]   = octree_create(tree, min, mid);
-    tree->children[LEFTBOTFRONT]  = octree_create(tree, {min.x, min.y, mid.z},
-                                                        {mid.x, mid.y, max.z});
-    tree->children[LEFTTOPBACK]   = octree_create(tree, {min.x, mid.y, min.z},
-                                                        {mid.x, max.y, mid.z});
-    tree->children[LEFTTOPFRONT]  = octree_create(tree, {min.x, mid.y, mid.z},
-                                                        {mid.x, max.y, max.z});
-    tree->children[RIGHTBOTBACK]  = octree_create(tree, {mid.x, min.y, min.z},
-                                                        {max.x, mid.y, mid.z});
-    tree->children[RIGHTBOTFRONT] = octree_create(tree, {mid.x, min.y, mid.z},
-                                                        {max.x, mid.y, max.z});
-    tree->children[RIGHTTOPBACK]  = octree_create(tree, {mid.x, mid.y, min.z},
-                                                        {max.x, max.y, mid.z});
+    tree->children[LEFTBOTFRONT]  = octree_create(tree, {{min.x, min.y, mid.z}},
+                                                        {{mid.x, mid.y, max.z}});
+    tree->children[LEFTTOPBACK]   = octree_create(tree, {{min.x, mid.y, min.z}},
+                                                        {{mid.x, max.y, mid.z}});
+    tree->children[LEFTTOPFRONT]  = octree_create(tree, {{min.x, mid.y, mid.z}},
+                                                        {{mid.x, max.y, max.z}});
+    tree->children[RIGHTBOTBACK]  = octree_create(tree, {{mid.x, min.y, min.z}},
+                                                        {{max.x, mid.y, mid.z}});
+    tree->children[RIGHTBOTFRONT] = octree_create(tree, {{mid.x, min.y, mid.z}},
+                                                        {{max.x, mid.y, max.z}});
+    tree->children[RIGHTTOPBACK]  = octree_create(tree, {{mid.x, mid.y, min.z}},
+                                                        {{max.x, max.y, mid.z}});
     tree->children[RIGHTTOPFRONT] = octree_create(tree, mid, max);
-    for(int i = 0; i < CHILDREN_COUNT; i++) tree->children[i]->voxel = NULL;
-    int pos = _get_pos_in_octree(tree->voxel->coord, mid_points);
+    for(int i = 0; i < CHILDREN_COUNT; i++) tree->children[i]->voxel = {0};
+    int pos = _get_pos_in_octree(tree->voxel.coord, mid_points);
     tree->children[pos]->voxel = tree->voxel;
-    tree->voxel = (Voxel_Object*)(sizeof(Voxel_Object));
-    if(!tree->voxel) return;
-    tree->voxel->coord.y = MIN_HEIGHT;
+    tree->voxel = _invalid_voxel();
+    tree->voxel.coord.y = MIN_HEIGHT;
+    return 0;
 }
 
-void octree_insert(Octree *tree, Voxel_Object *voxel) {
-    if(octree_find(tree, voxel->coord)) return;
+void octree_insert(Octree *tree, Voxel_Object voxel) {
+    if(voxel_obj_compare(octree_find(tree, voxel.coord), voxel)) return;
     if(!tree) return;
     Octree *curr = tree;
     while(true) {
-        if(!_coord_in_space(voxel->coord, curr->left_bot_back, curr->right_top_front)) return;
-        if(!curr->voxel) {
+        if(!_coord_in_space(voxel.coord, curr->left_bot_back, curr->right_top_front)) return;
+        if(!curr->has_voxel) {
             curr->voxel = voxel;
             return;
         }
-        if(ivec3_equal_vec(curr->voxel->coord, voxel->coord)) return;
+        if(ivec3_equal_vec(curr->voxel.coord, voxel.coord)) return;
         IVector3 mid_points = ivec3_scalar_div(ivec3_add(curr->left_bot_back, curr->right_top_front), 2);
-        int pos = _get_pos_in_octree(voxel->coord, mid_points);
-        if(curr->voxel->coord.y > MIN_HEIGHT || !curr->children) {
+        int pos = _get_pos_in_octree(voxel.coord, mid_points);
+        if(!curr->children) {
             _create_children(curr, mid_points);
             curr->children[pos]->voxel = voxel;
             return;
         }
         curr = curr->children[pos];
     }
-}
-
-//TODO: void octree_remove(IVector3 coord);
-
-void octree_delete(Octree *tree) {
-    if(!tree) return;
-    for(int i = 0; i < CHILDREN_COUNT; i++) octree_delete(tree);
-    free(tree->voxel);
-    free(tree->children);
-    free(tree);
 }
 
 Octree *_get_neighbour(Octree *node, IVector3 dir) {
@@ -183,17 +182,15 @@ Octree *_get_neighbour(Octree *node, IVector3 dir) {
     return parent;
 }
 
-Octree *octree_dda(Octree *tree, Ray ray) {
+Octree *octree_traverse(Octree *tree, Ray ray) {
     float tmin;
     float tmax;
 
     Vector3 cell_count = vec3_float(CELL_COUNT, CELL_COUNT, CELL_COUNT);
 
-
     /// make sure the ray hits the bounding box of the root octree node
     if (!ray_hits_box(ray, vec3_ivec3(tree->left_bot_back), vec3_ivec3(tree->right_top_front), &tmin, &tmax))
         return NULL;
-
 
     /// move the ray position to the point of intersection with the bounding volume.
     ray.origin = vec3_scalar_mul(ray.direction, fmin(tmin, tmax));
@@ -202,10 +199,6 @@ Octree *octree_dda(Octree *tree, Ray ray) {
     ///     leafSize is a Vector3 containing the dimensions of a leaf node in world-space coordinates
     ///     cellCount is a Vector3 containng the number of cells in each direction, or the size of the tree root divided by leafSize.
     Vector3 cell = vec3_min(vec3_ivec3(ivec3_vec3(vec3_sub(ray.origin, vec3_ivec3(tree->left_bot_back)))), vec3_sub(cell_count, vec3_one()));
-
-
-    /// get the Vector3 where of the intersection point relative to the tree root.
-    Vector3 pos = vec3_sub(ray.origin, vec3_ivec3(tree->left_bot_back));
 
     /// get the bounds of the starting cell - leaf size offset by "pos"
     Vector3 cell_lbb = vec3_float(cell.x - 0.5, cell.y - 0.5, cell.z - 0.5);
@@ -256,7 +249,7 @@ Octree *octree_dda(Octree *tree, Ray ray) {
         if(node->children)
             for(int i = 0; i < CHILDREN_COUNT; i++) {
                 Octree *child = node->children[i];
-                if(child && child->voxel && octree_find(child, ivec3_vec3(cell))) {
+                if(child && child->has_voxel && voxel_obj_compare(octree_find(child, ivec3_vec3(cell)), _invalid_voxel())) {
                     node = child;
                     i = -1;
 
@@ -297,7 +290,7 @@ Octree *octree_dda(Octree *tree, Ray ray) {
         /// see if the new cell coordinates fall within the current node.
         /// this is important when moving from a leaf into empty space within 
         /// the tree.
-        if(!octree_find(node, ivec3_vec3(cell))) {
+        if(!voxel_obj_compare(octree_find(node, ivec3_vec3(cell)), _invalid_voxel())) {
             /// if we stepped out of this node, grab the appropriate neighbor. 
             Vector3 neighbor_dir = neighbour_dirs[dir];
             node = _get_neighbour(node, ivec3_vec3(neighbor_dir));
@@ -306,5 +299,81 @@ Octree *octree_dda(Octree *tree, Ray ray) {
             return node;
     }
     return NULL;
+}
+
+size_t _octree_texel_size(Octree *tree) {
+    if(!tree) return 0;
+    if(!tree->children) return LEAF_SIZE;
+    size_t total = 1;
+    for(int i = 0; i < CHILDREN_COUNT; i++) {
+        total += _octree_texel_size(tree->children[i]);
+    }
+    return total;
+}
+
+void _encode_pointer(int block_index, uint8_t *out_voxel, size_t tex_dim) {
+    int z = block_index / (tex_dim * tex_dim);
+    int y = (block_index / tex_dim) % tex_dim;
+    int x = block_index % tex_dim;
+
+    out_voxel[0] = (uint8_t)x;
+    out_voxel[1] = (uint8_t)y;
+    out_voxel[2] = (uint8_t)z;
+    out_voxel[3] = 0; //Flag for internal node
+}
+
+void _transform_node_to_texture(Octree *node, 
+                                uint8_t *texture, 
+                                size_t *next_free_block, 
+                                size_t tex_dim) 
+{
+    size_t base = *next_free_block * sizeof(ColorRGBA);
+    if (node->children == NULL) {
+        texture[base + 0] = get_red_rgba(node->voxel.color);
+        texture[base + 1] = get_green_rgba(node->voxel.color);
+        texture[base + 2] = get_blue_rgba(node->voxel.color);
+        texture[base + 3] = 255; //Flag for leaf node
+        texture[base + 4] = (uint8_t)(node->voxel.voxel.refraction * (255.0 / 3.0)); //(output end / input end) * input
+        texture[base + 5] = (uint8_t)(node->voxel.voxel.illumination * 255.0);
+        texture[base + 6] = (uint8_t)(node->voxel.voxel.k * 255.0);
+        texture[base + 7] = 0; //no use yet
+        *next_free_block += LEAF_SIZE;
+        return;
+    }
+
+    *next_free_block += 1;
+
+    //Encode the address of this block as a "pointer"
+    _encode_pointer(*next_free_block, &texture[base], tex_dim);
+    
+    for (int i = 0; i < 8; ++i)
+        if (node->children[i])
+            _transform_node_to_texture(node->children[i], texture, next_free_block, tex_dim);
+}
+
+uint8_t *octree_texture(Octree *tree, size_t *arr_size) {
+    if(!tree || !arr_size) return NULL;
+    size_t voxel_count = _octree_texel_size(tree);
+    *arr_size = voxel_count * sizeof(ColorRGBA);
+    uint8_t *texture = (uint8_t*)calloc(1, *arr_size);
+    if(!texture) return NULL;
+    size_t next_free_block = 0;
+    size_t tex_dim = (size_t)ceil(cbrt((double)voxel_count));
+    if(tex_dim == 0) tex_dim = 1;
+    _transform_node_to_texture(tree, texture, &next_free_block, tex_dim);
+    return texture;
+}
+
+void octree_remove(Octree *tree, IVector3 coord) {
+    //find node with voxel with coord
+    //delete such voxel
+    //recursively test if parent node could be reduced
+}
+
+void octree_delete(Octree *tree) {
+    if(!tree) return;
+    for(int i = 0; i < CHILDREN_COUNT; i++) octree_delete(tree);
+    free(tree->children);
+    free(tree);
 }
 
