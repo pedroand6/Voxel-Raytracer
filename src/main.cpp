@@ -178,50 +178,85 @@ int main(void)
 
     // Lista de todos os tipos de voxels possívels
     Voxel voxels[] = {
-        {1.0f, 0.0f, 0.0f}, // VOX_AIR
-        {0.0f, 0.0f, 1.0f}, // VOX_GRASS
-        {0.0f, 0.0f, 1.0f}, // VOX_DIRT
-        {0.0f, 0.0f, 1.0f}, // VOX_WOOD
-        {0.0f, 0.0f, 1.0f}, // VOX_LEAVES
-        {1.33f, 0.0f, 0.4f}, // VOX_WATER
-        {0.0f, 0.0f, 1.0f}  // VOX_STONE
+        {3.0f, 0.0f, 0.0f}, // VOX_GRASS
+        {3.0f, 0.0f, 0.0f}, // VOX_DIRT
+        {3.0f, 0.0f, 0.0f}, // VOX_WOOD
+        {3.0f, 0.0f, 0.0f}, // VOX_LEAVES
+        {1.33f, 0.0f, 0.0f}, // VOX_WATER
+        {3.0f, 0.0f, 0.0f},  // VOX_STONE
+        {1.5f, 0.0f, 0.0f},  // VOX_GLASS
+        {2.42f, 0.0f, 0.0f},  // VOX_DIAMOND
+        {1.38f, 0.0f, 0.0f}  // VOX_JELLY
     };
 
-    Voxel_Type VOX_AIR = 0;
-    Voxel_Type VOX_GRASS = 1;
-    Voxel_Type VOX_DIRT = 2;
-    Voxel_Type VOX_WOOD = 3;
-    Voxel_Type VOX_LEAVES = 4;
-    Voxel_Type VOX_WATER = 5;
-    Voxel_Type VOX_STONE = 6;
+    Voxel_Type VOX_GRASS = 0;
+    Voxel_Type VOX_DIRT = 1;
+    Voxel_Type VOX_WOOD = 2;
+    Voxel_Type VOX_LEAVES = 3;
+    Voxel_Type VOX_WATER = 4;
+    Voxel_Type VOX_STONE = 5;
+    Voxel_Type VOX_GLASS = 6;
+    Voxel_Type VOX_DIAMOND = 7;
+    Voxel_Type VOX_JELLY = 8;
 
-    // Teto de água de teste
-    for (int x = 0; x < WORLD_SIZE_X; ++x) {
-        for (int z = 0; z < WORLD_SIZE_Z; ++z) {
-            int index = x + 20 * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = VoxelObjCreate(voxels[VOX_WATER], make_color_rgba(130, 160, 255, 200), {x, 20, z}); // Azul esverdeado transparente
+        // Room parameters (positioned near the center of the world)
+    int roomMinX = 12;
+    int roomMaxX = 51;
+    int roomMinZ = 12;
+    int roomMaxZ = 51;
+    int floorY = 1;
+    int wallHeight = 10;
+
+    // Create a grass floor
+    for (int x = roomMinX; x <= roomMaxX; ++x) {
+        for (int z = roomMinZ; z <= roomMaxZ; ++z) {
+            int index = x + floorY * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+            voxelData[index] = VoxelObjCreate(voxels[VOX_GRASS], make_color_rgba(100, 200, 80, 255), {x, floorY, z});
         }
     }
 
-    // Pilar de pedra branco
-    for (int y = 0; y < WORLD_SIZE_Y; ++y) {
-        int index = WORLD_SIZE_X / 2 + y * WORLD_SIZE_X + WORLD_SIZE_Z / 2 * WORLD_SIZE_X * WORLD_SIZE_Y;
-        voxelData[index] = VoxelObjCreate(voxels[VOX_STONE], make_color_rgba(220, 220, 220, 255), {WORLD_SIZE_X / 2, y, WORLD_SIZE_Z / 2});
-    }
+    // Build walls: 3 wood walls and 1 glass wall (glass will be on the +X side)
+    for (int y = floorY + 1; y <= floorY + wallHeight; ++y) {
+        // North wall (z = roomMinZ) - WOOD
+        for (int x = roomMinX; x <= roomMaxX; ++x) {
+            int index = x + y * WORLD_SIZE_X + roomMinZ * WORLD_SIZE_X * WORLD_SIZE_Y;
+            voxelData[index] = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMinZ});
+        }
 
-    // Parede de grama de teste
-    for (int y = 0; y < WORLD_SIZE_X; ++y) {
-        for (int z = 0; z < WORLD_SIZE_Z; ++z) {
-            int index = y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = VoxelObjCreate(voxels[VOX_GRASS], make_color_rgba(50, 230, 50, 255), {0, y, z}); // Azul esverdeado transparente
+        // South wall (z = roomMaxZ) - WOOD
+        for (int x = roomMinX; x <= roomMaxX; ++x) {
+            int index = x + y * WORLD_SIZE_X + roomMaxZ * WORLD_SIZE_X * WORLD_SIZE_Y;
+            voxelData[index] = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMaxZ});
+        }
+
+        // West wall (x = roomMinX) - WOOD
+        for (int z = roomMinZ; z <= roomMaxZ; ++z) {
+            int index = roomMinX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+            voxelData[index] = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {roomMinX, y, z});
+        }
+
+        // East wall (x = roomMaxX) - GLASS (slightly transparent)
+        for (int z = roomMinZ; z <= roomMaxZ; ++z) {
+            int index = roomMaxX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+            voxelData[index] = VoxelObjCreate(voxels[VOX_GLASS], make_color_rgba(180, 220, 255, 30), {roomMaxX, y, z});
         }
     }
 
-    // Chão de terra de teste
-    for (int x = 0; x < WORLD_SIZE_X; ++x) {
-        for (int z = 0; z < WORLD_SIZE_Z; ++z) {
-            int index = x + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = VoxelObjCreate(voxels[VOX_DIRT], make_color_rgba(215, 100, 130, 255), {x, 0, z}); // Azul esverdeado transparente
+    // Create a red jelly sphere inside the room
+    int cx = (roomMinX + roomMaxX) / 2;
+    int cz = (roomMinZ + roomMaxZ) / 2;
+    int cy = floorY + 6;
+    int radius = 5;
+    for (int x = cx - radius; x <= cx + radius; ++x) {
+        for (int y = cy - radius; y <= cy + radius; ++y) {
+            for (int z = cz - radius; z <= cz + radius; ++z) {
+                if (x < 0 || x >= WORLD_SIZE_X || y < 0 || y >= WORLD_SIZE_Y || z < 0 || z >= WORLD_SIZE_Z) continue;
+                int dx = x - cx; int dy = y - cy; int dz = z - cz;
+                if (dx*dx + dy*dy + dz*dz <= radius*radius) {
+                    int index = x + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+                    voxelData[index] = VoxelObjCreate(voxels[VOX_JELLY], make_color_rgba(230, 60, 80, 150), {x, y, z});
+                }
+            }
         }
     }
 
