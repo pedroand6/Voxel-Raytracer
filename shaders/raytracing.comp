@@ -27,15 +27,6 @@ vec4 rgbaColor(uint color) {
     );
 }
 
-vec4 blendTex(vec4 tex_1, vec4 tex_2, vec4 weights){
-    vec4 newTex;
-    newTex.r = mix(tex_1.r, tex_2.r, weights.r);
-    newTex.g = mix(tex_1.g, tex_2.g, weights.g);
-    newTex.b = mix(tex_1.b, tex_2.b, weights.b);
-    newTex.a = mix(tex_1.a, tex_2.a, weights.a);
-    return newTex;
-}
-
 struct Voxel {
     float refraction;
     float emmission;
@@ -53,8 +44,9 @@ struct Ray {
     vec3 origin;
     vec3 direction;
     float IOF;
-    vec4 weight;
+    vec3 weight;
     bool defined;
+    vec4 color;
 };
 
 layout (std430, binding = 2) buffer VoxelBuffer {
@@ -115,6 +107,27 @@ vec3 computeVoxelNormal(ivec3 pos) {
     if (len < 1e-4) return vec3(0.0); // no gradient
     // gradient points toward increasing density; surface normal should point outward from solid
     return normalize(-g);
+}
+
+// Calculate the final mixed color of all the rays accumulated (physically correct)
+vec4 accumulateColors(Ray rays[MAX_RAYS], vec4 colorBase) {
+    vec3 totalRGB = vec3(0.0);
+    vec3 totalWeight = vec3(0.0);
+
+    for (int i = 0; i < MAX_RAYS; i++) {
+        if (!rays[i].defined) continue;
+        totalRGB += rays[i].color.rgb * rays[i].weight;
+        totalWeight += rays[i].weight;
+    }
+
+    // Evita divisão por zero
+    vec3 blended = totalWeight.x > 0.0 || totalWeight.y > 0.0 || totalWeight.z > 0.0
+        ? totalRGB / max(totalWeight, vec3(1e-5))
+        : vec3(0.0);
+
+    //FIXME
+    // Mistura final com a cor base do voxel (ponderada por alpha físico)
+    return vec4(mix(blended, colorBase.rgb, colorBase.a), 1.0);
 }
 
 // March the ray through the voxel grid and return the first solid voxel hit.
@@ -183,8 +196,7 @@ bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out 
             if(prevIndex < 0) prevRefrac = 1.0;
 
             //FIXME
-            if (vcol.a > 0 && voxels[currentIndex].voxel.refraction != voxels[prevIndex].voxel.refraction 
-                && currentIndex != startIndex ) {
+            if (vcol.a > 0 && voxels[currentIndex].voxel.refraction != voxels[prevIndex].voxel.refraction && currentIndex != startIndex ) {
                 hitMapPos = mapPos;
                 prevMapPos = mapPos - stepSign * ((axis==0) ? ivec3(1,0,0) : (axis==1 ? ivec3(0,1,0) : ivec3(0,0,1)));
                 // precise hit point in world-space
@@ -210,14 +222,18 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
     if (thisVoxelIndex >= 0) startIOF = voxels[thisVoxelIndex].voxel.refraction;
 
     Ray rayStack[MAX_RAYS];
+    Ray resultRays[MAX_RAYS];
     for (int i = 0; i < MAX_RAYS; ++i) rayStack[i].defined = false;
 
     rayStack[0].origin = rayOrigin;
     rayStack[0].direction = normalize(rayDir);
     rayStack[0].IOF = startIOF;
     rayStack[0].defined = true;
-    rayStack[0].weight = vec4(1.0);
+    rayStack[0].weight = vec3(1.0);
     int stackSize = 1;
+    int resultSize = 0;
+
+    vec4 firstColor;
 
     while (stackSize > 0) {
         int rayIndex = stackSize - 1;
@@ -233,7 +249,11 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         bool hit = hitMarching(currentRay, mapPos, prevMapPos, hitPoint, hitNormal);
 
         if (!hit) {
-            finalColor = blendTex(finalColor, skyColor, currentRay.weight);
+            Ray finalRay;
+            finalRay.defined = true;
+            finalRay.weight = currentRay.weight;
+            finalRay.color = skyColor;
+            addRay(resultRays, finalRay, resultSize);
             continue;
         }
 
@@ -245,6 +265,7 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         else lastVoxel.voxel.refraction = currentRay.IOF;
 
         vec4 voxelColor = rgbaColor(thisVoxel.color);
+        vec4 lastVoxelColor = rgbaColor(lastVoxel.color);
 
         // precise normal and contact point from DDA
         vec3 normal = hitNormal;
@@ -276,20 +297,31 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         // Adicionamos a cor local ao resultado final, ponderada pelo fator difuso
         vec4 corLocal = vec4(voxelColor.rgb * finalLight, voxelColor.a);
 
+        if(resultSize == 0){
+            firstColor = corLocal;
+        }
+
         float refracIndex = thisVoxel.voxel.refraction;
         float prevRefracIndex = lastVoxel.voxel.refraction;
 
         if(prevRefracIndex <= 0.0) prevRefracIndex = 1.0;
 
-        if (abs(refracIndex - prevRefracIndex) > 1e-6 && refracIndex != 3.0 && prevRefracIndex != 3.0) {
+        if (voxelColor.a < 1.0 && lastVoxelColor.a < 1.0) {
             // Snell's Law
             vec3 incidentDir = normalize(currentRay.direction);
+            vec3 n = normal;
+            float cosi = dot(incidentDir, n);
             float n1 = prevRefracIndex;
             float n2 = refracIndex;
+            if (cosi > 0.0) {
+                n = -n; // invert normal
+                float tmp = n1;
+                n1 = n2;
+                n2 = tmp;
+            }
             float eta = n1 / n2;
-
-            vec3 refractDir = refract(incidentDir, normal, eta);
-            vec3 reflectDir = reflect(incidentDir, normal);
+            vec3 refractDir = refract(incidentDir, n, eta);
+            vec3 reflectDir = reflect(incidentDir, n);
 
             float R0 = pow((n1 - n2) / (n1 + n2), 2.0);
             float cosTheta = max(0.0, dot(-incidentDir, normal));
@@ -298,7 +330,7 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
             if (reflectIntensity > 0.01) {
                 Ray reflectionRay;
                 reflectionRay.direction = reflectDir;
-                reflectionRay.origin = rayContact + normal * 1e-4;
+                reflectionRay.origin = rayContact + n * 1e-4;
                 reflectionRay.defined = true;
                 reflectionRay.IOF = prevRefracIndex;
                 reflectionRay.weight = currentRay.weight * reflectIntensity;
@@ -307,12 +339,12 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
 
             float refractIntensity = 1.0 - reflectIntensity;
             float traveled = 0.0;
-            vec3 sigma = corLocal.a * (1.0 - corLocal.rgb);
+            vec3 sigma = (1.0 - corLocal.rgb) * corLocal.a;
             vec3 trans = vec3(1.0);
-            if (refractIntensity > 0.01 && length(refractDir) > 1e-9) {
+            if (refractIntensity > 0.01) {
                 Ray refractionRay;
                 refractionRay.direction = refractDir;
-                refractionRay.origin = rayContact - normal * 1e-4;
+                refractionRay.origin = rayContact - n * 1e-4;
                 refractionRay.defined = true;
                 refractionRay.IOF = refracIndex;
 
@@ -323,7 +355,7 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
                 }
 
                 trans = exp(-sigma * traveled);
-                refractionRay.weight = (vec4(trans, 1.0) * currentRay.weight) * refractIntensity;
+                refractionRay.weight = currentRay.weight * refractIntensity;
 
                 addRay(rayStack, refractionRay, stackSize);
             }
@@ -338,7 +370,11 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
 
             // --- 1. Calcular componente DIFUSA (se houver) ---
             if (diffuseFactor > 0.01) {
-                finalColor = blendTex(finalColor, corLocal, currentRay.weight * diffuseFactor);
+                Ray finalRay;
+                finalRay.defined = true;
+                finalRay.weight = currentRay.weight * diffuseFactor;
+                finalRay.color = corLocal;
+                addRay(resultRays, finalRay, resultSize);
             }
 
             // --- 2. Calcular componente ESPECULAR (Espelho) (se houver) ---
@@ -354,12 +390,11 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
                 // Adiciona o raio de reflexão, ponderado pelo fator especular
                 reflectionRay.weight = currentRay.weight * specularFactor;
                 addRay(rayStack, reflectionRay, stackSize);
-
-                finalColor = blendTex(finalColor, corLocal, currentRay.weight * diffuseFactor);
             }
         }
     } // fim do while
-    return finalColor;
+    
+    return accumulateColors(resultRays, firstColor);
 }
 
 void main() {
@@ -381,7 +416,7 @@ void main() {
 
     vec4 finalColor = raymarching_fromDir(cameraPos, worldDir);
 
-    if (finalColor.a == 0.0) finalColor = skyColor;
+    if (length(finalColor.rgb) == 0.0) finalColor = skyColor;
 
     imageStore(destTex, pixel_coords, finalColor);
 }

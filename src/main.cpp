@@ -178,7 +178,7 @@ int main(void)
 
     // Lista de todos os tipos de voxels possívels
     Voxel voxels[] = {
-        {3.0f, 0.0f, 0.0f}, // VOX_GRASS
+        {3.0f, 0.0f, 0.5f}, // VOX_GRASS
         {3.0f, 0.0f, 0.0f}, // VOX_DIRT
         {3.0f, 0.0f, 0.0f}, // VOX_WOOD
         {3.0f, 0.0f, 0.0f}, // VOX_LEAVES
