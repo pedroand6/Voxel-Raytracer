@@ -44,7 +44,7 @@ struct Ray {
     vec3 origin;
     vec3 direction;
     float IOF;
-    vec3 weight;
+    float weight;
     bool defined;
     vec4 color;
 };
@@ -69,8 +69,11 @@ bool popRay(inout Ray rays[MAX_RAYS], inout int stackSize) {
     return true;
 }
 
-bool addRay(inout Ray rays[MAX_RAYS], in Ray ray, inout int stackSize) {
-    if (stackSize >= MAX_RAYS) { // evita overflow
+// Safe addRay that never writes out-of-bounds
+bool addRay(inout Ray rays[MAX_RAYS], Ray ray, inout int stackSize) {
+    if (!ray.defined) return false;
+    if (stackSize < 0 || stackSize >= MAX_RAYS) {
+        // stack full, skip to avoid GPU crash
         return false;
     }
     rays[stackSize] = ray;
@@ -111,23 +114,22 @@ vec3 computeVoxelNormal(ivec3 pos) {
 
 // Calculate the final mixed color of all the rays accumulated (physically correct)
 vec4 accumulateColors(Ray rays[MAX_RAYS], vec4 colorBase) {
-    vec3 totalRGB = vec3(0.0);
-    vec3 totalWeight = vec3(0.0);
+    vec3 lightmap = vec3(0.0);
+    float totalWeight = 0.0;
 
-    for (int i = 0; i < MAX_RAYS; i++) {
+    for (int i = 0; i < MAX_RAYS; ++i) {
         if (!rays[i].defined) continue;
-        totalRGB += rays[i].color.rgb * rays[i].weight;
+        // acumula cor ponderada
+        lightmap += rays[i].color.rgb * rays[i].weight;
         totalWeight += rays[i].weight;
     }
 
-    // Evita divisão por zero
-    vec3 blended = totalWeight.x > 0.0 || totalWeight.y > 0.0 || totalWeight.z > 0.0
-        ? totalRGB / max(totalWeight, vec3(1e-5))
-        : vec3(0.0);
+    if (totalWeight > 0.0) lightmap /= totalWeight;
 
-    //FIXME
-    // Mistura final com a cor base do voxel (ponderada por alpha físico)
-    return vec4(mix(blended, colorBase.rgb, colorBase.a), 1.0);
+    if(colorBase.a >= 1.0) 
+        return vec4(lightmap, 1.0);
+    else 
+        return vec4(mix(lightmap, colorBase.rgb, colorBase.a), 1.0);
 }
 
 // March the ray through the voxel grid and return the first solid voxel hit.
@@ -189,16 +191,20 @@ bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out 
 
         // test the voxel we just entered
         int currentIndex = getVoxelIndex(mapPos);
+        prevMapPos = mapPos - stepSign * ((axis==0) ? ivec3(1,0,0) : (axis==1 ? ivec3(0,1,0) : ivec3(0,0,1)));
         int prevIndex = getVoxelIndex(prevMapPos);
         if (currentIndex >= 0) {
-            vec4 vcol = rgbaColor(voxels[currentIndex].color);
-            float prevRefrac = voxels[prevIndex].voxel.refraction;
-            if(prevIndex < 0) prevRefrac = 1.0;
+            float currentRefrac = voxels[currentIndex].voxel.refraction <= 0.0 ? 1.0 : voxels[currentIndex].voxel.refraction;
+            float prevRefrac = thisRay.IOF <= 0.0 ? 1.0 : thisRay.IOF;
 
-            //FIXME
-            if (vcol.a > 0 && voxels[currentIndex].voxel.refraction != voxels[prevIndex].voxel.refraction && currentIndex != startIndex ) {
+            float currentAlpha = currentIndex >= 0 ? rgbaColor(voxels[currentIndex].color).a : 0.0;
+            float prevAlpha = prevIndex >= 0 ? rgbaColor(voxels[prevIndex].color).a : 0.0;
+
+            bool refracChanged = abs(currentRefrac - prevRefrac) > 1e-4;
+            bool occupancyChanged = (currentAlpha > 0.0 && prevAlpha <= 0.0) || (currentAlpha <= 0.0 && prevAlpha > 0.0);
+
+            if (refracChanged && tHit > 1e-5) {
                 hitMapPos = mapPos;
-                prevMapPos = mapPos - stepSign * ((axis==0) ? ivec3(1,0,0) : (axis==1 ? ivec3(0,1,0) : ivec3(0,0,1)));
                 // precise hit point in world-space
                 hitPoint = origin + dir * tHit;
                 // normal points opposite to the step (faces toward previous cell)
@@ -223,19 +229,26 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
 
     Ray rayStack[MAX_RAYS];
     Ray resultRays[MAX_RAYS];
-    for (int i = 0; i < MAX_RAYS; ++i) rayStack[i].defined = false;
+    for (int i = 0; i < MAX_RAYS; ++i){
+        rayStack[i].defined = false;
+        resultRays[i].defined = false; // initialize result buffer to avoid garbage reads/crash
+        resultRays[i].weight = 0.0;
+        resultRays[i].color = vec4(0.0);
+    }
 
     rayStack[0].origin = rayOrigin;
     rayStack[0].direction = normalize(rayDir);
     rayStack[0].IOF = startIOF;
     rayStack[0].defined = true;
-    rayStack[0].weight = vec3(1.0);
+    rayStack[0].weight = 1.0;
     int stackSize = 1;
     int resultSize = 0;
 
     vec4 firstColor;
+    int counter = 0;
 
     while (stackSize > 0) {
+        counter++;
         int rayIndex = stackSize - 1;
         Ray currentRay = rayStack[rayIndex];
         popRay(rayStack, stackSize);
@@ -258,18 +271,41 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         }
 
         int index = getVoxelIndex(mapPos);
-        VoxelObj thisVoxel = voxels[index];
+        VoxelObj thisVoxel;
+        vec4 voxelColor;
+
+        if (index >= 0) {
+            thisVoxel = voxels[index];
+            voxelColor = rgbaColor(thisVoxel.color);
+        } else {
+            thisVoxel.coord = ivec3(0);
+            thisVoxel.color = 0u;
+            thisVoxel.voxel.refraction = 1.0;
+            thisVoxel.voxel.emmission = 0.0;
+            thisVoxel.voxel.mettalicity = 0.0;
+            thisVoxel.padding = 0.0;
+            voxelColor = vec4(0.0);
+        }
+
         int prevIndex = getVoxelIndex(prevMapPos);
         VoxelObj lastVoxel;
-        if (prevIndex >= 0) lastVoxel = voxels[prevIndex];
-        else lastVoxel.voxel.refraction = currentRay.IOF;
+        vec4 lastVoxelColor;
 
-        vec4 voxelColor = rgbaColor(thisVoxel.color);
-        vec4 lastVoxelColor = rgbaColor(lastVoxel.color);
+        if (prevIndex >= 0) {
+            lastVoxel = voxels[prevIndex];
+            lastVoxelColor = rgbaColor(lastVoxel.color);
+        } else {
+            lastVoxel.coord = ivec3(0);
+            lastVoxel.color = 0u;
+            lastVoxel.voxel.refraction = currentRay.IOF > 0.0 ? currentRay.IOF : 1.0;
+            lastVoxel.voxel.emmission = 0.0;
+            lastVoxel.voxel.mettalicity = 0.0;
+            lastVoxel.padding = 0.0;
+            lastVoxelColor = vec4(0.0);
+        }
 
-        // precise normal and contact point from DDA
         vec3 normal = hitNormal;
-        if (length(normal) == 0.0) normal = vec3(0.0, 1.0, 0.0); // fallback
+        if (length(normal) == 0.0) normal = vec3(0.0, 1.0, 0.0);
 
         vec3 lightDir = normalize(vec3(0.4, 1.0, 0.4));
         vec3 rayContact = hitPoint;
@@ -280,12 +316,13 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         float diff = max(dot(normal, lightDir), 0.0);
         vec3 diffuse = vec3(diff);
 
-        // Esta parte calcula a iluminação local (Ambiente + Difusa)
+        // Shadow check
         Ray lightRay;
-        lightRay.origin = rayContact + normal * 1e-3; 
+        lightRay.origin = rayContact + normal * 1e-3;
         lightRay.direction = lightDir;
-        lightRay.IOF = currentRay.IOF; // Sombra no meio atual
+        lightRay.IOF = currentRay.IOF;
         lightRay.defined = true;
+
         ivec3 shadowHit, shadowPrev;
         vec3 shadowPoint, shadowNormal;
         if (hitMarching(lightRay, shadowHit, shadowPrev, shadowPoint, shadowNormal)) {
@@ -293,28 +330,31 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         }
 
         vec3 finalLight = ambient + diffuse;
-        
-        // Adicionamos a cor local ao resultado final, ponderada pelo fator difuso
         vec4 corLocal = vec4(voxelColor.rgb * finalLight, voxelColor.a);
 
-        if(resultSize == 0){
+        if(counter == 1 && voxelColor.a > 0.0){
             firstColor = corLocal;
+        }
+        else if(counter == 1 && lastVoxelColor.a > 0.0){
+            firstColor = vec4(lastVoxelColor.rgb * finalLight, lastVoxelColor.a);
         }
 
         float refracIndex = thisVoxel.voxel.refraction;
         float prevRefracIndex = lastVoxel.voxel.refraction;
 
-        if(prevRefracIndex <= 0.0) prevRefracIndex = 1.0;
+        if (refracIndex <= 0.0) refracIndex = 1.0;
+        if (prevRefracIndex <= 0.0) prevRefracIndex = 1.0;
 
+        vec3 incidentDir = normalize(currentRay.direction);
+        vec3 n = normal;
+
+        // === REFLECTIVE / REFRACTIVE SURFACES ===
         if (voxelColor.a < 1.0 && lastVoxelColor.a < 1.0) {
-            // Snell's Law
-            vec3 incidentDir = normalize(currentRay.direction);
-            vec3 n = normal;
             float cosi = dot(incidentDir, n);
             float n1 = prevRefracIndex;
             float n2 = refracIndex;
             if (cosi > 0.0) {
-                n = -n; // invert normal
+                n = -n;
                 float tmp = n1;
                 n1 = n2;
                 n2 = tmp;
@@ -326,49 +366,40 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
             float R0 = pow((n1 - n2) / (n1 + n2), 2.0);
             float cosTheta = max(0.0, dot(-incidentDir, normal));
             float reflectIntensity = R0 + (1.0 - R0) * pow(1.0 - cosTheta, 5.0);
+            reflectIntensity = clamp(reflectIntensity, 0.0, 1.0);
 
-            if (reflectIntensity > 0.01) {
+            float refractIntensity = 1.0 - reflectIntensity;
+
+            // ---- Reflection ray (safe add) ----
+            if (reflectIntensity > 0.01 && stackSize < MAX_RAYS) {
                 Ray reflectionRay;
                 reflectionRay.direction = reflectDir;
-                reflectionRay.origin = rayContact + n * 1e-4;
+                reflectionRay.origin = rayContact + normal * 1e-4;
                 reflectionRay.defined = true;
                 reflectionRay.IOF = prevRefracIndex;
                 reflectionRay.weight = currentRay.weight * reflectIntensity;
-                addRay(rayStack, reflectionRay, stackSize);
+                if (reflectionRay.weight > 1e-4)
+                    addRay(rayStack, reflectionRay, stackSize);
             }
 
-            float refractIntensity = 1.0 - reflectIntensity;
-            float traveled = 0.0;
-            vec3 sigma = (1.0 - corLocal.rgb) * corLocal.a;
-            vec3 trans = vec3(1.0);
-            if (refractIntensity > 0.01) {
+            // ---- Refraction ray (safe add) ----
+            if (refractIntensity > 0.01 && stackSize < MAX_RAYS) {
                 Ray refractionRay;
                 refractionRay.direction = refractDir;
-                refractionRay.origin = rayContact - n * 1e-4;
+                refractionRay.origin = rayContact - normal * 1e-4;
                 refractionRay.defined = true;
                 refractionRay.IOF = refracIndex;
-
-                ivec3 refrMapPos, refrMapPrev;
-                vec3 refrHitPoint, refrNormal;
-                if (hitMarching(refractionRay, refrMapPos, refrMapPrev, refrHitPoint, refrNormal)) {
-                    traveled = length(refrHitPoint - refractionRay.origin);
-                }
-
-                trans = exp(-sigma * traveled);
                 refractionRay.weight = currentRay.weight * refractIntensity;
-
-                addRay(rayStack, refractionRay, stackSize);
+                if (refractionRay.weight > 1e-4)
+                    addRay(rayStack, refractionRay, stackSize);
             }
         }
         else {
-            // Esta superfície é opaca. Pode ser Difusa (pedra) ou Especular (espelho).
-            // Usamos 'k' como o "Fator Especular" (0.0 = 100% difuso, 1.0 = 100% espelho)
+            // === OPAQUE SURFACE ===
             float specularFactor = thisVoxel.voxel.mettalicity;
             float diffuseFactor = 1.0 - specularFactor;
-            
-            vec3 incidentDir = normalize(currentRay.direction); // Usado para reflexão
 
-            // --- 1. Calcular componente DIFUSA (se houver) ---
+            // Diffuse component
             if (diffuseFactor > 0.01) {
                 Ray finalRay;
                 finalRay.defined = true;
@@ -377,22 +408,20 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
                 addRay(resultRays, finalRay, resultSize);
             }
 
-            // --- 2. Calcular componente ESPECULAR (Espelho) (se houver) ---
-            if (specularFactor > 0.01) {
-                // Esta parte lança um novo raio de reflexão
+            // Specular reflection (safe add)
+            if (specularFactor > 0.01 && stackSize < MAX_RAYS) {
                 vec3 reflectDir = reflect(incidentDir, normal);
                 Ray reflectionRay;
                 reflectionRay.direction = reflectDir;
-                reflectionRay.origin = rayContact + normal * 1e-4; // Offset para fora
+                reflectionRay.origin = rayContact + normal * 1e-4;
                 reflectionRay.defined = true;
-                reflectionRay.IOF = prevRefracIndex; // Raio refletido está no mesmo meio
-                
-                // Adiciona o raio de reflexão, ponderado pelo fator especular
+                reflectionRay.IOF = prevRefracIndex;
                 reflectionRay.weight = currentRay.weight * specularFactor;
-                addRay(rayStack, reflectionRay, stackSize);
+                if (reflectionRay.weight > 1e-4)
+                    addRay(rayStack, reflectionRay, stackSize);
             }
         }
-    } // fim do while
+    }
     
     return accumulateColors(resultRays, firstColor);
 }
