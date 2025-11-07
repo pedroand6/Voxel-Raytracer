@@ -47,6 +47,7 @@ struct Ray {
     float weight;
     bool defined;
     vec4 color;
+    float accumulatedAlpha;
 };
 
 layout (std430, binding = 2) buffer VoxelBuffer {
@@ -113,7 +114,7 @@ vec3 computeVoxelNormal(ivec3 pos) {
 }
 
 // Calculate the final mixed color of all the rays accumulated (physically correct)
-vec4 accumulateColors(Ray rays[MAX_RAYS], vec4 colorBase) {
+vec4 accumulateColors(Ray rays[MAX_RAYS]) {
     vec3 lightmap = vec3(0.0);
     float totalWeight = 0.0;
 
@@ -126,10 +127,7 @@ vec4 accumulateColors(Ray rays[MAX_RAYS], vec4 colorBase) {
 
     if (totalWeight > 0.0) lightmap /= totalWeight;
 
-    if(colorBase.a >= 1.0) 
-        return vec4(lightmap, 1.0);
-    else 
-        return vec4(mix(lightmap, colorBase.rgb, colorBase.a), 1.0);
+    return vec4(lightmap, 1.0);
 }
 
 // March the ray through the voxel grid and return the first solid voxel hit.
@@ -241,10 +239,11 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
     rayStack[0].IOF = startIOF;
     rayStack[0].defined = true;
     rayStack[0].weight = 1.0;
+    rayStack[0].color = vec4(0.0);
+    rayStack[0].accumulatedAlpha = 0.0;
     int stackSize = 1;
     int resultSize = 0;
 
-    vec4 firstColor;
     int counter = 0;
 
     while (stackSize > 0) {
@@ -265,7 +264,15 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
             Ray finalRay;
             finalRay.defined = true;
             finalRay.weight = currentRay.weight;
-            finalRay.color = skyColor;
+
+            if(currentRay.accumulatedAlpha > 0.0){
+                vec4 finalTransparent = currentRay.color / currentRay.accumulatedAlpha; // FIXME
+                finalRay.color = mix(skyColor, finalTransparent, 0.5); // FIXME
+            }
+            else{
+                finalRay.color = skyColor;
+            }
+
             addRay(resultRays, finalRay, resultSize);
             continue;
         }
@@ -332,11 +339,8 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         vec3 finalLight = ambient + diffuse;
         vec4 corLocal = vec4(voxelColor.rgb * finalLight, voxelColor.a);
 
-        if(counter == 1 && voxelColor.a > 0.0){
-            firstColor = corLocal;
-        }
-        else if(counter == 1 && lastVoxelColor.a > 0.0){
-            firstColor = vec4(lastVoxelColor.rgb * finalLight, lastVoxelColor.a);
+        if(voxelColor.a <= 0 && lastVoxelColor.a > 0.0){
+            corLocal = vec4(lastVoxelColor.rgb * finalLight, lastVoxelColor.a);
         }
 
         float refracIndex = thisVoxel.voxel.refraction;
@@ -365,10 +369,10 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
 
             float R0 = pow((n1 - n2) / (n1 + n2), 2.0);
             float cosTheta = max(0.0, dot(-incidentDir, normal));
-            float reflectIntensity = R0 + (1.0 - R0) * pow(1.0 - cosTheta, 5.0);
+            float reflectIntensity = R0 + (1.0 - R0) * pow(1.0 - cosTheta, 5.0) * (1.0 - corLocal.a); // FIXME
             reflectIntensity = clamp(reflectIntensity, 0.0, 1.0);
 
-            float refractIntensity = 1.0 - reflectIntensity;
+            float refractIntensity = 1.0 - reflectIntensity; // FIXME
 
             // ---- Reflection ray (safe add) ----
             if (reflectIntensity > 0.01 && stackSize < MAX_RAYS) {
@@ -378,6 +382,8 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
                 reflectionRay.defined = true;
                 reflectionRay.IOF = prevRefracIndex;
                 reflectionRay.weight = currentRay.weight * reflectIntensity;
+                reflectionRay.color = currentRay.color + corLocal * corLocal.a * currentRay.weight; // FIXME
+                reflectionRay.accumulatedAlpha = currentRay.accumulatedAlpha + corLocal.a * currentRay.weight; // FIXME
                 if (reflectionRay.weight > 1e-4)
                     addRay(rayStack, reflectionRay, stackSize);
             }
@@ -390,6 +396,8 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
                 refractionRay.defined = true;
                 refractionRay.IOF = refracIndex;
                 refractionRay.weight = currentRay.weight * refractIntensity;
+                refractionRay.color = currentRay.color + corLocal * corLocal.a * currentRay.weight; // FIXME
+                refractionRay.accumulatedAlpha = currentRay.accumulatedAlpha + corLocal.a * currentRay.weight; // FIXME
                 if (refractionRay.weight > 1e-4)
                     addRay(rayStack, refractionRay, stackSize);
             }
@@ -404,7 +412,15 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
                 Ray finalRay;
                 finalRay.defined = true;
                 finalRay.weight = currentRay.weight * diffuseFactor;
-                finalRay.color = corLocal;
+
+                if(currentRay.accumulatedAlpha > 0.0){
+                    vec4 finalTransparent = currentRay.color / currentRay.accumulatedAlpha; // FIXME
+                    finalRay.color = mix(corLocal, finalTransparent, 0.5); // FIXME
+                }
+                else{
+                    finalRay.color = corLocal;
+                }
+                
                 addRay(resultRays, finalRay, resultSize);
             }
 
@@ -417,13 +433,15 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
                 reflectionRay.defined = true;
                 reflectionRay.IOF = prevRefracIndex;
                 reflectionRay.weight = currentRay.weight * specularFactor;
+                reflectionRay.color = currentRay.color + corLocal * currentRay.weight; // FIXME
+                reflectionRay.accumulatedAlpha = currentRay.accumulatedAlpha + currentRay.weight; // FIXME
                 if (reflectionRay.weight > 1e-4)
                     addRay(rayStack, reflectionRay, stackSize);
             }
         }
     }
     
-    return accumulateColors(resultRays, firstColor);
+    return accumulateColors(resultRays);
 }
 
 void main() {

@@ -178,7 +178,7 @@ int main(void)
 
     // Lista de todos os tipos de voxels possívels
     Voxel voxels[] = {
-        {3.0f, 0.0f, 0.5f}, // VOX_GRASS
+        {3.0f, 0.0f, 0.0f}, // VOX_GRASS
         {3.0f, 0.0f, 0.0f}, // VOX_DIRT
         {3.0f, 0.0f, 0.0f}, // VOX_WOOD
         {3.0f, 0.0f, 0.0f}, // VOX_LEAVES
@@ -199,7 +199,7 @@ int main(void)
     Voxel_Type VOX_DIAMOND = 7;
     Voxel_Type VOX_JELLY = 8;
 
-        // Room parameters (positioned near the center of the world)
+    // Room parameters (positioned near the center of the world)
     int roomMinX = 12;
     int roomMaxX = 51;
     int roomMinZ = 12;
@@ -238,7 +238,7 @@ int main(void)
         // East wall (x = roomMaxX) - GLASS (slightly transparent)
         for (int z = roomMinZ; z <= roomMaxZ; ++z) {
             int index = roomMaxX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = VoxelObjCreate(voxels[VOX_GLASS], make_color_rgba(180, 220, 255, 30), {roomMaxX, y, z});
+            voxelData[index] = VoxelObjCreate(voxels[VOX_GLASS], make_color_rgba(100, 100, 255, 1), {roomMaxX, y, z});
         }
     }
 
@@ -254,7 +254,7 @@ int main(void)
                 int dx = x - cx; int dy = y - cy; int dz = z - cz;
                 if (dx*dx + dy*dy + dz*dz <= radius*radius) {
                     int index = x + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-                    voxelData[index] = VoxelObjCreate(voxels[VOX_JELLY], make_color_rgba(230, 60, 80, 150), {x, y, z});
+                    voxelData[index] = VoxelObjCreate(voxels[VOX_JELLY], make_color_rgba(230, 60, 80, 254), {x, y, z});
                 }
             }
         }

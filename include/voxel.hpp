@@ -8,9 +8,7 @@ extern "C" {
 typedef uint32_t Voxel_Type;
 
 struct Voxel {
-    float refraction;
-    float illumination;
-    float k;
+    float refraction, illumination, k;
 };
 
 struct Voxel_Object {
