@@ -46,8 +46,10 @@ struct Ray {
     float IOF;
     float weight;
     bool defined;
-    vec4 color;
-    float accumulatedAlpha;
+    vec4 colorTint;
+    float distanceInMedium;
+    vec4 mediumColor;
+    float mediumDensity;
 };
 
 layout (std430, binding = 2) buffer VoxelBuffer {
@@ -70,20 +72,14 @@ bool popRay(inout Ray rays[MAX_RAYS], inout int stackSize) {
     return true;
 }
 
-// Safe addRay that never writes out-of-bounds
 bool addRay(inout Ray rays[MAX_RAYS], Ray ray, inout int stackSize) {
     if (!ray.defined) return false;
     if (stackSize < 0 || stackSize >= MAX_RAYS) {
-        // stack full, skip to avoid GPU crash
         return false;
     }
     rays[stackSize] = ray;
     stackSize += 1;
     return true;
-}
-
-vec3 map_vec3(vec3 value, vec3 min1, vec3 max1, vec3 min2, vec3 max2) {
-  return min2 + (value - min1) * (max2 - min2) / (max1 - min1);
 }
 
 vec4 getVoxelColor(ivec3 coord) {
@@ -92,66 +88,44 @@ vec4 getVoxelColor(ivec3 coord) {
     return rgbaColor(voxels[idx].color);
 }
 
-// Sample a scalar 'density' at integer voxel coordinates (0..1 alpha)
 float sampleDensity(ivec3 c) {
     vec4 ccol = getVoxelColor(c);
     return ccol.a;
 }
 
-// Compute a smooth normal from neighboring voxel densities using central differences.
-// This gives smoother normals across flat surfaces (like water planes).
-vec3 computeVoxelNormal(ivec3 pos) {
-    // central differences across integer neighbors
-    float dx = sampleDensity(pos + ivec3(1,0,0)) - sampleDensity(pos + ivec3(-1,0,0));
-    float dy = sampleDensity(pos + ivec3(0,1,0)) - sampleDensity(pos + ivec3(0,-1,0));
-    float dz = sampleDensity(pos + ivec3(0,0,1)) - sampleDensity(pos + ivec3(0,0,-1));
-
-    vec3 g = vec3(dx, dy, dz);
-    float len = length(g);
-    if (len < 1e-4) return vec3(0.0); // no gradient
-    // gradient points toward increasing density; surface normal should point outward from solid
-    return normalize(-g);
-}
-
-// Calculate the final mixed color of all the rays accumulated (physically correct)
 vec4 accumulateColors(Ray rays[MAX_RAYS]) {
-    vec3 lightmap = vec3(0.0);
+    vec3 result = vec3(0.0);
     float totalWeight = 0.0;
-
+    
     for (int i = 0; i < MAX_RAYS; ++i) {
         if (!rays[i].defined) continue;
-        // acumula cor ponderada
-        lightmap += rays[i].color.rgb * rays[i].weight;
+        result += rays[i].colorTint.rgb * rays[i].weight;
         totalWeight += rays[i].weight;
     }
 
-    if (totalWeight > 0.0) lightmap /= totalWeight;
+    if(totalWeight < 1.0){
+        result /= totalWeight;
+    }
 
-    return vec4(lightmap, 1.0);
+    return vec4(result, 1.0);
 }
 
-// March the ray through the voxel grid and return the first solid voxel hit.
-// Returns true and fills hitMapPos, prevMapPos, hitPoint (world-space) and hitNormal (unit).
 bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out vec3 hitPoint, out vec3 hitNormal) {
     const float EPS = 1e-6;
     vec3 origin = thisRay.origin;
     vec3 dir = normalize(thisRay.direction);
 
-    // inicializa pos do voxel onde o raio está
     ivec3 mapPos = ivec3(floor(origin));
     prevMapPos = mapPos;
 
-    // step sign for each axis (integer -1, 0, +1)
     ivec3 stepSign = ivec3(sign(dir));
 
-    // tDelta: distance along ray to cross one voxel on each axis
     vec3 tDelta = vec3(
         abs(dir.x) > EPS ? abs(1.0 / dir.x) : 1e30,
         abs(dir.y) > EPS ? abs(1.0 / dir.y) : 1e30,
         abs(dir.z) > EPS ? abs(1.0 / dir.z) : 1e30
     );
 
-    // next voxel boundary (first crossing)
     vec3 voxelBoundary = floor(origin) + vec3(step(0.0, dir.x), step(0.0, dir.y), step(0.0, dir.z));
 
     vec3 tMax = vec3(
@@ -160,11 +134,7 @@ bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out 
         abs(dir.z) > EPS ? (voxelBoundary.z - origin.z) / dir.z : 1e30
     );
 
-    int startIndex = getVoxelIndex(mapPos);
-
-    // DDA: step first then test the new voxel so we can compute the exact hit t & normal
     for (int i = 0; i < 1024; ++i) {
-        // choose axis to step
         int axis = 0;
         if (tMax.x < tMax.y) {
             axis = (tMax.x < tMax.z) ? 0 : 2;
@@ -187,25 +157,20 @@ bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out 
             tMax.z += tDelta.z;
         }
 
-        // test the voxel we just entered
-        int currentIndex = getVoxelIndex(mapPos);
         prevMapPos = mapPos - stepSign * ((axis==0) ? ivec3(1,0,0) : (axis==1 ? ivec3(0,1,0) : ivec3(0,0,1)));
+        
+        int currentIndex = getVoxelIndex(mapPos);
         int prevIndex = getVoxelIndex(prevMapPos);
+        
         if (currentIndex >= 0) {
             float currentRefrac = voxels[currentIndex].voxel.refraction <= 0.0 ? 1.0 : voxels[currentIndex].voxel.refraction;
-            float prevRefrac = thisRay.IOF <= 0.0 ? 1.0 : thisRay.IOF;
-
-            float currentAlpha = currentIndex >= 0 ? rgbaColor(voxels[currentIndex].color).a : 0.0;
-            float prevAlpha = prevIndex >= 0 ? rgbaColor(voxels[prevIndex].color).a : 0.0;
+            float prevRefrac = (prevIndex >= 0 && voxels[prevIndex].voxel.refraction > 0.0) ? voxels[prevIndex].voxel.refraction : thisRay.IOF;
 
             bool refracChanged = abs(currentRefrac - prevRefrac) > 1e-4;
-            bool occupancyChanged = (currentAlpha > 0.0 && prevAlpha <= 0.0) || (currentAlpha <= 0.0 && prevAlpha > 0.0);
 
             if (refracChanged && tHit > 1e-5) {
                 hitMapPos = mapPos;
-                // precise hit point in world-space
                 hitPoint = origin + dir * tHit;
-                // normal points opposite to the step (faces toward previous cell)
                 if (axis == 0) hitNormal = vec3(-float(stepSign.x), 0.0, 0.0);
                 else if (axis == 1) hitNormal = vec3(0.0, -float(stepSign.y), 0.0);
                 else hitNormal = vec3(0.0, 0.0, -float(stepSign.z));
@@ -218,20 +183,20 @@ bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out 
 }
 
 vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
-    vec4 finalColor = vec4(0.0);
-
     ivec3 thisMapPos = ivec3(floor(rayOrigin));
     int thisVoxelIndex = getVoxelIndex(thisMapPos);
-    float startIOF = 1.0; // valor default para fora (ar)
-    if (thisVoxelIndex >= 0) startIOF = voxels[thisVoxelIndex].voxel.refraction;
+    float startIOF = 1.0;
+    if (thisVoxelIndex >= 0 && voxels[thisVoxelIndex].voxel.refraction > 0.0) {
+        startIOF = voxels[thisVoxelIndex].voxel.refraction;
+    }
 
     Ray rayStack[MAX_RAYS];
     Ray resultRays[MAX_RAYS];
     for (int i = 0; i < MAX_RAYS; ++i){
         rayStack[i].defined = false;
-        resultRays[i].defined = false; // initialize result buffer to avoid garbage reads/crash
+        resultRays[i].defined = false;
         resultRays[i].weight = 0.0;
-        resultRays[i].color = vec4(0.0);
+        resultRays[i].colorTint = vec4(0.0);
     }
 
     rayStack[0].origin = rayOrigin;
@@ -239,17 +204,17 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
     rayStack[0].IOF = startIOF;
     rayStack[0].defined = true;
     rayStack[0].weight = 1.0;
-    rayStack[0].color = vec4(0.0);
-    rayStack[0].accumulatedAlpha = 0.0;
+    rayStack[0].colorTint = vec4(1.0);
+    rayStack[0].distanceInMedium = 0.0;
+    rayStack[0].mediumColor = vec4(1.0);
+    rayStack[0].mediumDensity = 0.0;
     int stackSize = 1;
     int resultSize = 0;
 
-    int counter = 0;
-
     while (stackSize > 0) {
-        counter++;
         int rayIndex = stackSize - 1;
         Ray currentRay = rayStack[rayIndex];
+        vec3 rayStartPoint = currentRay.origin;
         popRay(rayStack, stackSize);
 
         if (!currentRay.defined) continue;
@@ -264,18 +229,24 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
             Ray finalRay;
             finalRay.defined = true;
             finalRay.weight = currentRay.weight;
-
-            if(currentRay.accumulatedAlpha > 0.0){
-                vec4 finalTransparent = currentRay.color / currentRay.accumulatedAlpha; // FIXME
-                finalRay.color = mix(skyColor, finalTransparent, 0.5); // FIXME
+            
+            // Apply Beer's Law absorption for the final segment
+            vec4 transmittedColor = currentRay.colorTint;
+            float distanceTraveled = currentRay.distanceInMedium;
+            if (distanceTraveled > 1e-6 && currentRay.mediumDensity > 0.0) {
+                vec3 absorption = exp(-currentRay.mediumDensity * distanceTraveled * (vec3(1.0) - currentRay.mediumColor.rgb));
+                transmittedColor.rgb *= absorption;
             }
-            else{
-                finalRay.color = skyColor;
-            }
-
+            
+            // Blend with sky color
+            finalRay.colorTint = transmittedColor * skyColor;
             addRay(resultRays, finalRay, resultSize);
             continue;
         }
+
+        // Update distance traveled through current medium
+        float segmentDistance = length(hitPoint - rayStartPoint);
+        currentRay.distanceInMedium += segmentDistance;
 
         int index = getVoxelIndex(mapPos);
         VoxelObj thisVoxel;
@@ -285,12 +256,9 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
             thisVoxel = voxels[index];
             voxelColor = rgbaColor(thisVoxel.color);
         } else {
-            thisVoxel.coord = ivec3(0);
-            thisVoxel.color = 0u;
             thisVoxel.voxel.refraction = 1.0;
             thisVoxel.voxel.emmission = 0.0;
             thisVoxel.voxel.mettalicity = 0.0;
-            thisVoxel.padding = 0.0;
             voxelColor = vec4(0.0);
         }
 
@@ -302,12 +270,9 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
             lastVoxel = voxels[prevIndex];
             lastVoxelColor = rgbaColor(lastVoxel.color);
         } else {
-            lastVoxel.coord = ivec3(0);
-            lastVoxel.color = 0u;
             lastVoxel.voxel.refraction = currentRay.IOF > 0.0 ? currentRay.IOF : 1.0;
             lastVoxel.voxel.emmission = 0.0;
             lastVoxel.voxel.mettalicity = 0.0;
-            lastVoxel.padding = 0.0;
             lastVoxelColor = vec4(0.0);
         }
 
@@ -315,7 +280,6 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         if (length(normal) == 0.0) normal = vec3(0.0, 1.0, 0.0);
 
         vec3 lightDir = normalize(vec3(0.4, 1.0, 0.4));
-        vec3 rayContact = hitPoint;
 
         float ambientStrength = 0.2;
         vec3 ambient = vec3(ambientStrength);
@@ -325,7 +289,7 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
 
         // Shadow check
         Ray lightRay;
-        lightRay.origin = rayContact + normal * 1e-3;
+        lightRay.origin = hitPoint + normal * 1e-3;
         lightRay.direction = lightDir;
         lightRay.IOF = currentRay.IOF;
         lightRay.defined = true;
@@ -337,23 +301,34 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         }
 
         vec3 finalLight = ambient + diffuse;
-        vec4 corLocal = vec4(voxelColor.rgb * finalLight, voxelColor.a);
-
-        if(voxelColor.a <= 0 && lastVoxelColor.a > 0.0){
-            corLocal = vec4(lastVoxelColor.rgb * finalLight, lastVoxelColor.a);
+        
+        // Determine surface color based on which side we're hitting
+        vec4 surfaceColor;
+        float surfaceAlpha;
+        if (voxelColor.a > 0.0) {
+            surfaceColor = voxelColor;
+            surfaceAlpha = voxelColor.a;
+        } else {
+            surfaceColor = lastVoxelColor;
+            surfaceAlpha = lastVoxelColor.a;
         }
 
-        float refracIndex = thisVoxel.voxel.refraction;
-        float prevRefracIndex = lastVoxel.voxel.refraction;
-
-        if (refracIndex <= 0.0) refracIndex = 1.0;
-        if (prevRefracIndex <= 0.0) prevRefracIndex = 1.0;
+        float refracIndex = thisVoxel.voxel.refraction > 0.0 ? thisVoxel.voxel.refraction : 1.0;
+        float prevRefracIndex = lastVoxel.voxel.refraction > 0.0 ? lastVoxel.voxel.refraction : 1.0;
 
         vec3 incidentDir = normalize(currentRay.direction);
         vec3 n = normal;
 
-        // === REFLECTIVE / REFRACTIVE SURFACES ===
-        if (voxelColor.a < 1.0 && lastVoxelColor.a < 1.0) {
+        // Apply Beer's Law absorption for distance traveled so far
+        vec4 transmittedColor = currentRay.colorTint;
+        float distanceTraveled = currentRay.distanceInMedium;
+        if (distanceTraveled > 1e-6 && currentRay.mediumDensity > 0.0) {
+            vec3 absorption = exp(-currentRay.mediumDensity * distanceTraveled * (vec3(1.0) - currentRay.mediumColor.rgb));
+            transmittedColor.rgb *= absorption;
+        }
+
+        // === TRANSPARENT/TRANSLUCENT SURFACES ===
+        if (surfaceAlpha < 1) {
             float cosi = dot(incidentDir, n);
             float n1 = prevRefracIndex;
             float n2 = refracIndex;
@@ -368,36 +343,60 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
             vec3 reflectDir = reflect(incidentDir, n);
 
             float R0 = pow((n1 - n2) / (n1 + n2), 2.0);
-            float cosTheta = max(0.0, dot(-incidentDir, normal));
-            float reflectIntensity = R0 + (1.0 - R0) * pow(1.0 - cosTheta, 5.0) * (1.0 - corLocal.a); // FIXME
-            reflectIntensity = clamp(reflectIntensity, 0.0, 1.0);
+            float cosTheta = max(0.0, dot(-incidentDir, n));
+            float fresnel = R0 + (1.0 - R0) * pow(1.0 - cosTheta, 5.0);
+            fresnel = clamp(fresnel, 0.0, 1.0);
 
-            float refractIntensity = 1.0 - reflectIntensity; // FIXME
+            bool hasTIR = length(refractDir) < 0.001;
+            float reflectIntensity = fresnel;
+            float refractIntensity = hasTIR ? 0.0 : (1.0 - fresnel);
 
-            // ---- Reflection ray (safe add) ----
-            if (reflectIntensity > 0.01 && stackSize < MAX_RAYS) {
+            // DONT WASTE ENERGY YOU SICK FUCK
+            if(stackSize == MAX_RAYS || reflectIntensity <= 0.001 || refractIntensity <= 0.001){
+                vec4 litSurfaceColor = vec4(surfaceColor.rgb * finalLight, 1.0);
+                Ray finalRay;
+                finalRay.defined = true;
+                finalRay.weight = currentRay.weight;
+                finalRay.colorTint = transmittedColor * litSurfaceColor;
+                
+                addRay(resultRays, finalRay, resultSize);
+                continue;
+            }
+
+            // ---- Reflection ray ----
+            if (reflectIntensity > 0.001 && stackSize < MAX_RAYS) {
                 Ray reflectionRay;
                 reflectionRay.direction = reflectDir;
-                reflectionRay.origin = rayContact + normal * 1e-4;
+                reflectionRay.origin = hitPoint + n * 1e-4;
                 reflectionRay.defined = true;
-                reflectionRay.IOF = prevRefracIndex;
+                reflectionRay.IOF = n1;
                 reflectionRay.weight = currentRay.weight * reflectIntensity;
-                reflectionRay.color = currentRay.color + corLocal * corLocal.a * currentRay.weight; // FIXME
-                reflectionRay.accumulatedAlpha = currentRay.accumulatedAlpha + corLocal.a * currentRay.weight; // FIXME
+                reflectionRay.colorTint = transmittedColor;
+                
+                // Going back into previous medium
+                reflectionRay.distanceInMedium = 0.0;
+                reflectionRay.mediumColor = lastVoxelColor;
+                reflectionRay.mediumDensity = lastVoxelColor.a * 5.0;
+                
                 if (reflectionRay.weight > 1e-4)
                     addRay(rayStack, reflectionRay, stackSize);
             }
 
-            // ---- Refraction ray (safe add) ----
-            if (refractIntensity > 0.01 && stackSize < MAX_RAYS) {
+            // ---- Refraction ray ----
+            if (refractIntensity > 0.001 && stackSize < MAX_RAYS && !hasTIR) {
                 Ray refractionRay;
                 refractionRay.direction = refractDir;
-                refractionRay.origin = rayContact - normal * 1e-4;
+                refractionRay.origin = hitPoint - n * 1e-4;
                 refractionRay.defined = true;
-                refractionRay.IOF = refracIndex;
+                refractionRay.IOF = n2;
                 refractionRay.weight = currentRay.weight * refractIntensity;
-                refractionRay.color = currentRay.color + corLocal * corLocal.a * currentRay.weight; // FIXME
-                refractionRay.accumulatedAlpha = currentRay.accumulatedAlpha + corLocal.a * currentRay.weight; // FIXME
+                refractionRay.colorTint = transmittedColor;
+                
+                // Entering new medium
+                refractionRay.distanceInMedium = 0.0;
+                refractionRay.mediumColor = voxelColor;
+                refractionRay.mediumDensity = voxelColor.a * 5.0;
+                
                 if (refractionRay.weight > 1e-4)
                     addRay(rayStack, refractionRay, stackSize);
             }
@@ -407,34 +406,32 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
             float specularFactor = thisVoxel.voxel.mettalicity;
             float diffuseFactor = 1.0 - specularFactor;
 
+            vec4 litSurfaceColor = vec4(surfaceColor.rgb * finalLight, 1.0);
+
             // Diffuse component
             if (diffuseFactor > 0.01) {
                 Ray finalRay;
                 finalRay.defined = true;
                 finalRay.weight = currentRay.weight * diffuseFactor;
-
-                if(currentRay.accumulatedAlpha > 0.0){
-                    vec4 finalTransparent = currentRay.color / currentRay.accumulatedAlpha; // FIXME
-                    finalRay.color = mix(corLocal, finalTransparent, 0.5); // FIXME
-                }
-                else{
-                    finalRay.color = corLocal;
-                }
+                finalRay.colorTint = transmittedColor * litSurfaceColor;
                 
                 addRay(resultRays, finalRay, resultSize);
             }
 
-            // Specular reflection (safe add)
+            // Specular reflection
             if (specularFactor > 0.01 && stackSize < MAX_RAYS) {
                 vec3 reflectDir = reflect(incidentDir, normal);
                 Ray reflectionRay;
                 reflectionRay.direction = reflectDir;
-                reflectionRay.origin = rayContact + normal * 1e-4;
+                reflectionRay.origin = hitPoint + normal * 1e-4;
                 reflectionRay.defined = true;
                 reflectionRay.IOF = prevRefracIndex;
                 reflectionRay.weight = currentRay.weight * specularFactor;
-                reflectionRay.color = currentRay.color + corLocal * currentRay.weight; // FIXME
-                reflectionRay.accumulatedAlpha = currentRay.accumulatedAlpha + currentRay.weight; // FIXME
+                reflectionRay.colorTint = transmittedColor;
+                reflectionRay.distanceInMedium = 0.0;
+                reflectionRay.mediumColor = vec4(1.0);
+                reflectionRay.mediumDensity = 0.0;
+                
                 if (reflectionRay.weight > 1e-4)
                     addRay(rayStack, reflectionRay, stackSize);
             }
@@ -453,10 +450,8 @@ void main() {
     float u = (float(pixel_coords.x) / float(dims.x)) * 2.0 - 1.0;
     float v = (float(pixel_coords.y) / float(dims.y)) * 2.0 - 1.0;
 
-    // Geração correta do raio: NDC -> view -> world
-    vec4 clip = vec4(u, v, -1.0, 1.0); // z = -1 (near plane)
+    vec4 clip = vec4(u, v, -1.0, 1.0);
     vec4 view = invProjection * clip;
-    // divide por w para obter coordenada em view space
     if (abs(view.w) > 1e-6) view /= view.w;
     vec3 viewDir = normalize(view.xyz);
     vec3 worldDir = normalize((invView * vec4(viewDir, 0.0)).xyz);
