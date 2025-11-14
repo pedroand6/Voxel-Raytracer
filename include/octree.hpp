@@ -25,6 +25,7 @@ void octree_insert(Octree *tree, Voxel_Object voxel);
 Voxel_Object octree_find(Octree *tree, IVector3 coord);
 Octree *octree_traverse(Octree *tree, Ray ray);
 uint8_t *octree_texture(Octree *tree, size_t *arr_size);
+size_t _octree_texel_size(Octree *tree);
 void octree_remove(Octree *tree, IVector3 coord);
 void octree_delete(Octree *tree);
 

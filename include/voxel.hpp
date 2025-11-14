@@ -15,8 +15,6 @@ struct Voxel_Object {
     IVector3 coord;
     ColorRGBA color;
     Voxel voxel;
-    
-    float padding;
 };
 
 

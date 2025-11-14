@@ -172,9 +172,9 @@ int main(void)
 
     glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
 
-    //Octree* chunk0 = octree_create(NULL, {0,0,0}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
-
-    std::vector<Voxel_Object> voxelData(WORLD_VOLUME);
+    glm::vec3 min_bounds(0.0f, 0.0f, 0.0f);
+    glm::vec3 max_bounds(WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z);
+    Octree* chunk0 = octree_create(NULL, {0,0,0}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
 
     // Lista de todos os tipos de voxels possívels
     Voxel voxels[] = {
@@ -211,7 +211,8 @@ int main(void)
     for (int x = roomMinX; x <= roomMaxX; ++x) {
         for (int z = roomMinZ; z <= roomMaxZ; ++z) {
             int index = x + floorY * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = VoxelObjCreate(voxels[VOX_GRASS], make_color_rgba(100, 200, 80, 255), {x, floorY, z});
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_GRASS], make_color_rgba(100, 200, 80, 255), {x, floorY, z});
+            octree_insert(chunk0, voxel);
         }
     }
 
@@ -219,26 +220,30 @@ int main(void)
     for (int y = floorY + 1; y <= floorY + wallHeight; ++y) {
         // North wall (z = roomMinZ) - WOOD
         for (int x = roomMinX; x <= roomMaxX; ++x) {
-            int index = x + y * WORLD_SIZE_X + roomMinZ * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMinZ});
+            //int index = x + y * WORLD_SIZE_X + roomMinZ * WORLD_SIZE_X * WORLD_SIZE_Y;
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMinZ});
+            octree_insert(chunk0, voxel);
         }
 
         // South wall (z = roomMaxZ) - WOOD
         for (int x = roomMinX; x <= roomMaxX; ++x) {
-            int index = x + y * WORLD_SIZE_X + roomMaxZ * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMaxZ});
+            //int index = x + y * WORLD_SIZE_X + roomMaxZ * WORLD_SIZE_X * WORLD_SIZE_Y;
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMaxZ});
+            octree_insert(chunk0, voxel);
         }
 
         // West wall (x = roomMinX) - WOOD
         for (int z = roomMinZ; z <= roomMaxZ; ++z) {
-            int index = roomMinX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {roomMinX, y, z});
+            //int index = roomMinX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {roomMinX, y, z});
+            octree_insert(chunk0, voxel);
         }
 
-        // East wall (x = roomMaxX) - GLASS (slightly transparent)
+        // East wall (x = roomMaxX) - GLASS
         for (int z = roomMinZ; z <= roomMaxZ; ++z) {
-            int index = roomMaxX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            voxelData[index] = VoxelObjCreate(voxels[VOX_GLASS], make_color_rgba(100, 100, 230, 40), {roomMaxX, y, z});
+            //int index = roomMaxX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_GLASS], make_color_rgba(100, 100, 230, 40), {roomMaxX, y, z});
+            octree_insert(chunk0, voxel);
         }
     }
 
@@ -253,26 +258,101 @@ int main(void)
                 if (x < 0 || x >= WORLD_SIZE_X || y < 0 || y >= WORLD_SIZE_Y || z < 0 || z >= WORLD_SIZE_Z) continue;
                 int dx = x - cx; int dy = y - cy; int dz = z - cz;
                 if (dx*dx + dy*dy + dz*dz <= radius*radius) {
-                    int index = x + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-                    voxelData[index] = VoxelObjCreate(voxels[VOX_JELLY], make_color_rgba(240, 100, 200, 100), {x, y, z});
+                    //int index = x + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_JELLY], make_color_rgba(255, 0, 0, 100), {x, y, z});
+                    octree_insert(chunk0, voxel);
                 }
             }
         }
     }
 
-    GLuint ssbo_voxels;
-    glGenBuffers(1, &ssbo_voxels);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_voxels);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, voxelData.size() * sizeof(Voxel_Object), voxelData.data(), GL_STATIC_DRAW);
+    // Create Octree texture
+    size_t arr_size;
+    uint8_t* texture_data = octree_texture(chunk0, &arr_size);
 
-    // Vincula o buffer ao ponto de ligação 2 (corresponderá ao binding no shader)
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssbo_voxels);
+    // O tex_dim que você calculou
+    size_t tex_dim = (size_t)ceil(cbrt((double)_octree_texel_size(chunk0)));
+    if (tex_dim == 0) tex_dim = 1;
+
+    // --- Carga para a GPU ---
+    GLuint textureID;
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_3D, textureID); // <-- Informa que é 3D
+
+    // --- ADICIONE ESTA LINHA ---
+    // Informa ao OpenGL que seus dados de pixel estão compactados.
+    // (O alinhamento é de 1 byte, não o padrão de 4).
+    // Isso impede que o OpenGL leia mal os seus dados.
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    
+    // --- FIM DA CORREÇÃO ---
+
+    // Agora chame o glTexImage3D (estou assumindo que você está
+    // usando a versão síncrona, sem PBO)
+    glTexImage3D(
+        GL_TEXTURE_3D,       // Alvo
+        0,                   // Nível de Mipmap
+        GL_RGBA8,            // Formato interno na GPU
+        (GLsizei)tex_dim,    // LARGURA
+        (GLsizei)tex_dim,    // ALTURA
+        (GLsizei)tex_dim,    // PROFUNDIDADE
+        0,                   // Borda
+        GL_RGBA,             // Formato dos seus dados (R,G,B,A)
+        GL_UNSIGNED_BYTE,    // Tipo dos seus dados (uint8_t)
+        NULL                 // O ponteiro para o seu array 1D
+    );
+    
+    // (Opcional, mas boa prática) Redefina o alinhamento para o padrão
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+
+    // Use GL_NEAREST...
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+    // Create PBO
+    GLuint pboID;
+    glGenBuffers(1, &pboID);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pboID);
+
+    // Allocate PBO and upload voxels
+    // 1. Calcule o tamanho total do *container* da textura em texels
+    size_t voxel_count_in_cube = tex_dim * tex_dim * tex_dim;
+    
+    // 2. Calcule o tamanho total do container em bytes
+    // (Assumindo 4 bytes por texel, como em octree.cpp)
+    size_t buffer_size_bytes = voxel_count_in_cube * 4;
+
+    // 3. Aloque o PBO com o tamanho total do CONTAINER
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, buffer_size_bytes, NULL, GL_STREAM_DRAW);
+    
+    // 4. Mapeie o buffer (como antes)
+    void* gpu_pointer = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+    
+    // 5. Copie APENAS os dados válidos (arr_size) para o início do buffer
+    memcpy(gpu_pointer, texture_data, arr_size);
+    
+    // 6. Desmapeie (como antes)
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+
+    // Schedule the asynchronous transfer from PBO to texture
+    // The 'NULL' here tells OpenGL to use the bound GL_PIXEL_UNPACK_BUFFER
+    glTexSubImage3D(GL_TEXTURE_3D, 
+                    0,          // Mipmap level
+                    0,0,0,          // offset
+                    (GLsizei)tex_dim, (GLsizei)tex_dim, (GLsizei)tex_dim,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    NULL);
+
+    // Unbind the PBO
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+
 
     // UBO para a câmera
     struct CameraData {
         glm::mat4 invProjection;
         glm::mat4 invView;
-        glm::vec3 cameraPos;
+        glm::vec4 cameraPos;
     };
 
     GLuint uboCamera;
@@ -313,6 +393,10 @@ int main(void)
     glAttachShader(computeProgram, compute_raytracing);
     glLinkProgram(computeProgram);
     checkProgramLinking(computeProgram);
+
+    GLint texDimLoc = glGetUniformLocation(computeProgram, "u_texDim");
+    GLint minBoundsLoc = glGetUniformLocation(computeProgram, "u_worldBoundsMin");
+    GLint maxBoundsLoc = glGetUniformLocation(computeProgram, "u_worldBoundsMax");
 
     // Configurar os shaders do Quad
     const GLuint quad_vertex_shader = glCreateShader(GL_VERTEX_SHADER);
@@ -367,7 +451,12 @@ int main(void)
         
         // Vincular recursos
         glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssbo_voxels);
+
+        glActiveTexture(GL_TEXTURE0 + 2);
+        glBindTexture(GL_TEXTURE_3D, textureID);
+        glUniform1f(texDimLoc, (GLfloat)tex_dim);
+        glUniform3fv(minBoundsLoc, 1, (const GLfloat*)&min_bounds);
+        glUniform3fv(maxBoundsLoc, 1, (const GLfloat*)&max_bounds);
 
         // Dispara os threads do compute shader.
         // Dividimos o tamanho da tela pelo tamanho do grupo de trabalho definido no shader.
@@ -398,7 +487,8 @@ int main(void)
 
     glDeleteVertexArrays(1, &quadVAO);
 	glDeleteBuffers(1, &quadEBO);
-    glDeleteBuffers(1, &ssbo_voxels);
+    glDeleteBuffers(1, &pboID);
+    glDeleteTextures(1, &textureID);
     glDeleteTextures(1, &outputTexture);
     glDeleteShader(compute_raytracing);
     glDeleteProgram(computeProgram);
