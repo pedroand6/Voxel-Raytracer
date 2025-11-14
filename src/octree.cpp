@@ -19,7 +19,7 @@ extern "C" {
 
 #define CHILDREN_COUNT 8
 
-#define LEAF_SIZE 2
+#define LEAF_SIZE 3
 
 enum pos_in_octree {
     LEFTBOTBACK,
@@ -43,31 +43,32 @@ IVector3 _get_node_size(Octree *node) {
 }
 
 int _get_pos_in_octree(IVector3 coord, IVector3 mid_points) {
-    if (coord.x <= mid_points.x) {
-        if (coord.y <= mid_points.y) {
-            if (coord.z <= mid_points.z)
+    // Lógica simétrica: Esquerda < mid, Direita >= mid
+    if (coord.x < mid_points.x) { // Esquerda
+        if (coord.y < mid_points.y) { // Baixo
+            if (coord.z < mid_points.z) // Trás
                 return LEFTBOTBACK;
-            else
+            else // Frente
                 return LEFTBOTFRONT;
         }
-        else {
-            if (coord.z <= mid_points.z)
+        else { // Cima
+            if (coord.z < mid_points.z) // Trás
                 return LEFTTOPBACK;
-            else
+            else // Frente
                 return LEFTTOPFRONT;
         }
     }
-    else {
-        if (coord.y <= mid_points.y) {
-            if (coord.z <= mid_points.z)
+    else { // Direita (coord.x >= mid_points.x)
+        if (coord.y < mid_points.y) { // Baixo
+            if (coord.z < mid_points.z) // Trás
                 return RIGHTBOTBACK;
-            else
+            else // Frente
                 return RIGHTBOTFRONT;
         }
-        else {
-            if (coord.z <= mid_points.z)
+        else { // Cima
+            if (coord.z < mid_points.z) // Trás
                 return RIGHTTOPBACK;
-            else
+            else // Frente
                 return RIGHTTOPFRONT;
         }
     }
@@ -127,13 +128,23 @@ Voxel_Object octree_find(Octree *tree, IVector3 coord) {
     return _invalid_voxel();
 }
 
-int _create_children(Octree *tree, IVector3 mid_points) {
+int _create_children(Octree *tree, IVector3 mid_points_ignoradas) {
     tree->children = (Octree**)malloc(sizeof(Octree*) * CHILDREN_COUNT);
     if(!tree->children) return -1;
+    
     IVector3 min = tree->left_bot_back;
     IVector3 max = tree->right_top_front;
-    IVector3 mid = ivec3_scalar_div(ivec3_add(min, max), 2);
     
+    // --- INÍCIO DA CORREÇÃO ---
+    // Use a matemática de divisão correta que evita o loop infinito.
+    IVector3 mid;
+    mid.x = min.x + (max.x - min.x) / 2;
+    mid.y = min.y + (max.y - min.y) / 2;
+    mid.z = min.z + (max.z - min.z) / 2;
+    // --- FIM DA CORREÇÃO ---
+    
+    // (A sua lógica de criação de limites estava correta, 
+    // ela só precisava do 'mid' corrigido.)
     tree->children[LEFTBOTBACK]   = octree_create(tree, min, mid);
     tree->children[LEFTBOTFRONT]  = octree_create(tree, {{min.x, min.y, mid.z}},
                                                         {{mid.x, mid.y, max.z}});
@@ -149,20 +160,17 @@ int _create_children(Octree *tree, IVector3 mid_points) {
                                                         {{max.x, max.y, mid.z}});
     tree->children[RIGHTTOPFRONT] = octree_create(tree, mid, max);
 
-    // Inicializa todos os novos filhos como vazios
     for(int i = 0; i < CHILDREN_COUNT; i++) {
-        tree->children[i]->voxel = _invalid_voxel(); // ou {0}
-        tree->children[i]->has_voxel = false; // <-- CORREÇÃO
+        tree->children[i]->voxel = _invalid_voxel(); 
+        tree->children[i]->has_voxel = false; 
     }
     
-    // Move o voxel antigo do pai para o filho correto
-    int pos = _get_pos_in_octree(tree->voxel.coord, mid_points);
-    tree->children[pos]->voxel = tree->voxel;
-    tree->children[pos]->has_voxel = true; // <-- CORREÇÃO CRÍTICA
+    int pos = _get_pos_in_octree(tree->voxel.coord, mid); 
     
-    // Limpa o voxel do pai (agora é um nó interno)
+    tree->children[pos]->voxel = tree->voxel;
+    tree->children[pos]->has_voxel = true; 
     tree->voxel = _invalid_voxel();
-    tree->has_voxel = false; // <-- CORREÇÃO CRÍTICA
+    tree->has_voxel = false; 
     
     return 0;
 }
@@ -174,44 +182,34 @@ void octree_insert(Octree *tree, Voxel_Object voxel) {
     while(true) {
         if (_coord_is_outside(voxel.coord, curr->left_bot_back, curr->right_top_front)) return;
 
-        // --- INÍCIO DA CORREÇÃO DE LÓGICA ---
-        
-        // 1. Se eu sou um NÓ INTERNO (tenho filhos), eu NUNCA armazeno um voxel.
-        //    Apenas desço para o filho correto.
         if (curr->children) {
-            IVector3 mid_points = ivec3_scalar_div(ivec3_add(curr->left_bot_back, curr->right_top_front), 2);
-            int pos = _get_pos_in_octree(voxel.coord, mid_points);
+            IVector3 mid;
+            mid.x = curr->left_bot_back.x + (curr->right_top_front.x - curr->left_bot_back.x) / 2;
+            mid.y = curr->left_bot_back.y + (curr->right_top_front.y - curr->left_bot_back.y) / 2;
+            mid.z = curr->left_bot_back.z + (curr->right_top_front.z - curr->left_bot_back.z) / 2;
+            
+            int pos = _get_pos_in_octree(voxel.coord, mid);
             curr = curr->children[pos];
-            continue; // Reinicia o loop no nível do filho
+            continue; 
         }
         
-        // 2. Se eu cheguei aqui, eu sou um NÓ FOLHA (NÃO tenho filhos).
-
-        // 2a. Se eu sou um nó folha VAZIO, armazeno o voxel e termino.
         if (!curr->has_voxel) {
             curr->voxel = voxel;
             curr->has_voxel = true;
             return;
         }
 
-        // 2b. Se eu sou um nó folha CHEIO, e o voxel é o mesmo, atualizo e termino.
         if (ivec3_equal_vec(curr->voxel.coord, voxel.coord)) {
-            curr->voxel = voxel; // Atualiza
+            curr->voxel = voxel; 
             return;
         }
-        
-        IVector3 mid_points = ivec3_scalar_div(ivec3_add(curr->left_bot_back, curr->right_top_front), 2);
-        _create_children(curr, mid_points); 
-        
-        // _create_children moveu o voxel ANTIGO para um filho e
-        // definiu curr->has_voxel = false.
-        
-        // O loop agora vai rodar novamente. Na próxima iteração:
-        // 1. `if (curr->children)` será VERDADEIRO.
-        // 2. O código (corretamente) descerá para o filho `pos`.
-        // 3. O NOVO voxel será inserido no filho correto.
-        
-        // --- FIM DA CORREÇÃO ---
+
+        IVector3 mid;
+        mid.x = curr->left_bot_back.x + (curr->right_top_front.x - curr->left_bot_back.x) / 2;
+        mid.y = curr->left_bot_back.y + (curr->right_top_front.y - curr->left_bot_back.y) / 2;
+        mid.z = curr->left_bot_back.z + (curr->right_top_front.z - curr->left_bot_back.z) / 2;
+
+        _create_children(curr, mid); 
     }
 }
 
@@ -333,13 +331,11 @@ Octree *octree_traverse(Octree *tree, Ray ray) {
     return NULL;
 }
 
-// CORRIGIDO: Esta é a correção CRÍTICA para evitar o buffer overflow.
 size_t _octree_texel_size(Octree *tree) {
     if(!tree) return 0;
-    if(!tree->children) return LEAF_SIZE; // Nó folha = 2 texels
+    if(!tree->children) return LEAF_SIZE; // <-- Agora retorna 3
     
-    // Nó interno:
-    size_t total = 1 + 8; // <-- CORRETO: 1 (pai) + 8 (bloco de ponteiros)
+    size_t total = 1 + 8; // 1 (pai) + 8 (bloco de ponteiros)
     
     for(int i = 0; i < CHILDREN_COUNT; i++) {
         total += _octree_texel_size(tree->children[i]);
@@ -369,58 +365,54 @@ void _transform_node_to_texture(Octree *node,
                                 size_t *next_free_block, 
                                 size_t tex_dim) 
 {
-    // (Assumindo sizeof(ColorRGBA) == 4 bytes)
-    size_t base = *next_free_block * 4; 
+    size_t base = *next_free_block * 4; // (4 bytes por texel)
     
     if (node->children == NULL) {
-        // (Assumindo que has_voxel está sendo usado corretamente)
+        // ---- Início da Lógica da Folha (LEAF_SIZE = 3) ----
+        
+        // TEXEL 0: Cor (RGB) e Flag de Folha (A)
         texture[base + 0] = get_red_rgba(node->voxel.color);
         texture[base + 1] = get_green_rgba(node->voxel.color);
         texture[base + 2] = get_blue_rgba(node->voxel.color);
         texture[base + 3] = 255; //Flag for leaf node
         
-        texture[base + 4] = (uint8_t)(node->voxel.voxel.refraction * (255.0 / 3.0)); 
-        texture[base + 5] = (uint8_t)(node->voxel.voxel.illumination * 255.0);
-        texture[base + 6] = (uint8_t)(node->voxel.voxel.k * 255.0);
-        texture[base + 7] = get_alpha_rgba(node->voxel.color); //color alpha
+        // TEXEL 1: Coordenada do Voxel (XYZ) e Alpha da Cor (A)
+        // (Isso assume que as coordenadas do mundo estão entre 0-255)
+        texture[base + 4] = (uint8_t)(node->voxel.coord.x);
+        texture[base + 5] = (uint8_t)(node->voxel.coord.y);
+        texture[base + 6] = (uint8_t)(node->voxel.coord.z);
+        texture[base + 7] = get_alpha_rgba(node->voxel.color); // color alpha
+        
+        // TEXEL 2: Propriedades (RGB) e (A não usado)
+        texture[base + 8] = (uint8_t)(node->voxel.voxel.refraction * (255.0 / 3.0));
+        texture[base + 9] = (uint8_t)(node->voxel.voxel.illumination * 255.0);
+        texture[base + 10] = (uint8_t)(node->voxel.voxel.k * 255.0);
+        texture[base + 11] = 0; // Não usado
+
         *next_free_block += LEAF_SIZE;
+        // ---- Fim da Lógica da Folha ----
         return;
     }
 
-    // --- Lógica do Nó Interno ---
-    
-    // 1. Guarda o endereço deste nó pai
+    // --- Lógica do Nó Interno (igual a antes) ---
     size_t pai_base_addr = *next_free_block;
-    *next_free_block += 1; // Aloca espaço para o nó pai
-    
-    // 2. Guarda o endereço do futuro "bloco de ponteiros"
+    *next_free_block += 1; 
     size_t ponteiro_bloco_addr = *next_free_block;
-    *next_free_block += 8; // Aloca 8 blocos para os ponteiros!
+    *next_free_block += 8; 
     
-    // 3. Escreve o ponteiro no nó pai (pai_base_addr) para apontar
-    //    para o bloco de ponteiros (ponteiro_bloco_addr)
     _encode_pointer(ponteiro_bloco_addr, &texture[pai_base_addr * 4], tex_dim);
     
-    // 4. Loop para processar os filhos
     for (int i = 0; i < 8; ++i)
     {
         if (node->children[i])
         {
-            // 5. Guarda onde este filho VAI começar (o bloco livre atual)
             size_t filho_addr = *next_free_block;
-            
-            // 6. Escreve o ponteiro para este filho DENTRO do bloco de ponteiros
-            // (O endereço é: ponteiro_bloco_addr + i)
             size_t ptr_slot_base = (ponteiro_bloco_addr + i) * 4;
             _encode_pointer(filho_addr, &texture[ptr_slot_base], tex_dim);
-            
-            // 7. Chama recursivamente para preencher a sub-árvore do filho
             _transform_node_to_texture(node->children[i], texture, next_free_block, tex_dim);
         }
         else
         {
-            // Se o filho for nulo (árvore esparsa), 
-            // escreve um ponteiro nulo (ex: 0,0,0)
             size_t ptr_slot_base = (ponteiro_bloco_addr + i) * 4;
             _encode_pointer(0, &texture[ptr_slot_base], tex_dim);
         }

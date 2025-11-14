@@ -204,8 +204,8 @@ int main(void)
     int roomMaxX = 51;
     int roomMinZ = 12;
     int roomMaxZ = 51;
-    int floorY = 1;
-    int wallHeight = 10;
+    int floorY = 20;
+    int wallHeight = 20;
 
     // Create a grass floor
     for (int x = roomMinX; x <= roomMaxX; ++x) {
@@ -259,7 +259,7 @@ int main(void)
                 int dx = x - cx; int dy = y - cy; int dz = z - cz;
                 if (dx*dx + dy*dy + dz*dz <= radius*radius) {
                     //int index = x + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_JELLY], make_color_rgba(255, 0, 0, 100), {x, y, z});
+                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_JELLY], make_color_rgba(240, 100, 100, 100), {x, y, z});
                     octree_insert(chunk0, voxel);
                 }
             }
@@ -416,6 +416,8 @@ int main(void)
     checkProgramLinking(quadProgram);
     glUseProgram(quadProgram);
     glUniform1i(glGetUniformLocation(quadProgram, "screenTexture"), 0);
+
+    //std::cout << (int)get_green_rgba(octree_find(chunk0, {roomMinX, floorY, roomMinZ}).color) << std::endl;
 
     float now, lastTime = 0.0f;
     // Dentro do seu game loop

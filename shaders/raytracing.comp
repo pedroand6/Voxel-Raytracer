@@ -9,7 +9,7 @@
 #define INTERNAL_NODE_FLAG 0.0
 
 // A dimensão da sua folha em texels (baseado no seu C++)
-#define LEAF_SIZE 2
+#define LEAF_SIZE 3
 
 const ivec3 worldSize = ivec3(64, 64, 64);
 const int MAX_RAYS = 8;
@@ -82,17 +82,30 @@ int getChildIndex(ivec3 worldPos, ivec3 nodeMidPoint) {
     return index;
 }
 
-// Substitua 'vec3' por 'ivec3' em tudo
+// Esta função DEVE espelhar a lógica de 'mid' e os limites do C++
+// A lógica C++ é complexa, mas a divisão do cubo principal é simples:
 void getChildBounds(int childIndex, inout ivec3 nodeMin, inout ivec3 nodeMax) {
     // Usa divisão de inteiros, igual ao C++
     ivec3 mid = (nodeMin + nodeMax) / 2; 
     
     // Testa o bit X (4)
-    if ((childIndex & 4) == 4) nodeMin.x = mid.x; else nodeMax.x = mid.x;
+    if ((childIndex & 4) == 4) { // Lado Direito (X)
+        nodeMin.x = mid.x;
+    } else { // Lado Esquerdo (X)
+        nodeMax.x = mid.x;
+    }
     // Testa o bit Y (2)
-    if ((childIndex & 2) == 2) nodeMin.y = mid.y; else nodeMax.y = mid.y;
+    if ((childIndex & 2) == 2) { // Lado de Cima (Y)
+        nodeMin.y = mid.y;
+    } else { // Lado de Baixo (Y)
+        nodeMax.y = mid.y;
+    }
     // Testa o bit Z (1)
-    if ((childIndex & 1) == 1) nodeMin.z = mid.z; else nodeMax.z = mid.z;
+    if ((childIndex & 1) == 1) { // Lado da Frente (Z)
+        nodeMin.z = mid.z;
+    } else { // Lado de Trás (Z)
+        nodeMax.z = mid.z;
+    }
 }
 
 // Converte os dados de propriedade (armazenados como 0-255) de volta
@@ -141,37 +154,54 @@ VoxelData octreeFind(ivec3 worldPos) {
     }
 
     ivec3 currentNodeCoord = ivec3(0, 0, 0); 
-    
-    // --- INÍCIO DA CORREÇÃO DE LÓGICA ---
-    // Comece com 'ivec3' para forçar a matemática de inteiros
     ivec3 nodeMin = ivec3(u_worldBoundsMin);
-    ivec3 nodeMax = ivec3(u_worldBoundsMax - 1); // Limites do mundo são 0-63
-    // --- FIM DA CORREÇÃO ---
+    ivec3 nodeMax = ivec3(u_worldBoundsMax) - ivec3(1.0); // max é (63, 63, 63)
     
     for (int i = 0; i < 32; i++) {
-        vec4 nodeData = getNodeData(currentNodeCoord);
+        vec4 nodeData = getNodeData(currentNodeCoord); // Lê o Texel 0 (Cor/Flag)
 
+        // --- É um NÓ FOLHA? ---
         if (nodeData.a >= LEAF_FLAG) {
-            data.found = true;
-            data.color.rgb = nodeData.rgb; 
             
+            // --- INÍCIO DA CORREÇÃO (Protuberâncias) ---
+            // É uma folha, mas ela representa este voxel 'worldPos'?
+            
+            // 1. Encontre o Texel 1 (Coordenadas)
             int linearIndex = toLinear(currentNodeCoord, tex_dim_int);
-            ivec3 propCoord = fromLinear(linearIndex + 1, tex_dim_int);
+            ivec3 coordTexelCoord = fromLinear(linearIndex + 1, tex_dim_int);
+            vec4 coordData = getNodeData(coordTexelCoord); // Lê (X, Y, Z, Cor.a)
+
+            // 2. Decodifique a coordenada armazenada na folha
+            //    (Use a mesma lógica de decodePointer, mas só para 3 canais)
+            ivec3 leafVoxelCoord = ivec3(round(coordData.rgb * 255.0));
+
+            // 3. Compare a coordenada da folha com a que estamos procurando
+            if (!all(equal(leafVoxelCoord, worldPos))) {
+                // NÃO. É uma folha, mas para um voxel diferente
+                // que compartilha este nó. Trate como ar.
+                return data; // Retorna data (found=false)
+            }
             
-            vec4 propData = getNodeData(propCoord);
-            data.color.a = propData.a;
+            // Esta folha é exatamente o voxel que procuramos.
+            data.found = true;
+            data.color.rgb = nodeData.rgb; // Cor (do Texel 0)
+            data.color.a = coordData.a;    // Alpha da Cor (do Texel 1)
+
+            // 4. Encontre o Texel 2 (Propriedades)
+            ivec3 propTexelCoord = fromLinear(linearIndex + 2, tex_dim_int);
+            vec4 propData = getNodeData(propTexelCoord); // Lê (Ref, Ill, K, _)
+            
             data.properties = decodeProperties(propData);
             return data;
+            // --- FIM DA CORREÇÃO ---
         }
 
+        // --- É um NÓ INTERNO? ---
         if (nodeData.a <= INTERNAL_NODE_FLAG) {
+            // (Esta lógica já está correta)
             ivec3 pointerBlockBaseCoord = decodePointer(nodeData.rgb);
-            
-            // --- CORREÇÃO DE LÓGICA ---
-            // Usa divisão de inteiros, igual ao C++
             ivec3 midPoint = (nodeMin + nodeMax) / 2;
             int childIndex = getChildIndex(worldPos, midPoint);
-            // --- FIM DA CORREÇÃO ---
             
             int linearBaseIndex = toLinear(pointerBlockBaseCoord, tex_dim_int);
             ivec3 childPointerCoord = fromLinear(linearBaseIndex + childIndex, tex_dim_int);
@@ -183,7 +213,6 @@ VoxelData octreeFind(ivec3 worldPos) {
                 return data; // Ponteiro nulo
             }
 
-            // Atualiza os limites usando a matemática de inteiros
             getChildBounds(childIndex, nodeMin, nodeMax);
         }
     }
@@ -295,8 +324,6 @@ bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out 
         
         prevVoxel = hitVoxel;
         hitVoxel = octreeFind(mapPos);
-
-        if(hitVoxel.color.r == 1.0) return true; //Verificação
 
         float prevRefrac = (prevVoxel.found && prevVoxel.properties[0] > 0.0) ? prevVoxel.properties[0] : thisRay.IOF;
     
