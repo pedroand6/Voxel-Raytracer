@@ -19,9 +19,9 @@ FINAL = main
 
 # --- Flags ---
 # C++ specific flags
-CXXFLAGS = -g -std=c++17 -Wall -I$(INC_DIR) -I$(INC_DIR)/vmm
+CXXFLAGS = -std=c++17 -Wall -I$(INC_DIR) -I$(INC_DIR)/vmm -O3
 # C specific flags
-CFLAGS = -g -Wall -I$(INC_DIR) -I$(INC_DIR)/vmm
+CFLAGS = -Wall -I$(INC_DIR) -I$(INC_DIR)/vmm -O3
 
 # Linker flags
 LDFLAGS = -L$(LIB_DIR)

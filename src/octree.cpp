@@ -162,7 +162,6 @@ int _create_children(Octree *tree, IVector3 mid_points_ignoradas) {
 
     for(int i = 0; i < CHILDREN_COUNT; i++) {
         tree->children[i]->voxel = _invalid_voxel(); 
-        tree->children[i]->has_voxel = false; 
     }
     
     int pos = _get_pos_in_octree(tree->voxel.coord, mid); 
@@ -200,7 +199,7 @@ void octree_insert(Octree *tree, Voxel_Object voxel) {
         }
 
         if (ivec3_equal_vec(curr->voxel.coord, voxel.coord)) {
-            curr->voxel = voxel; 
+            curr->voxel = voxel;
             return;
         }
 
@@ -374,7 +373,7 @@ void _transform_node_to_texture(Octree *node,
         texture[base + 0] = get_red_rgba(node->voxel.color);
         texture[base + 1] = get_green_rgba(node->voxel.color);
         texture[base + 2] = get_blue_rgba(node->voxel.color);
-        texture[base + 3] = 255; //Flag for leaf node
+        texture[base + 3] = node->has_voxel | 254; //Flag for leaf node
         
         // TEXEL 1: Coordenada do Voxel (XYZ) e Alpha da Cor (A)
         // (Isso assume que as coordenadas do mundo estão entre 0-255)
@@ -398,7 +397,7 @@ void _transform_node_to_texture(Octree *node,
     size_t pai_base_addr = *next_free_block;
     *next_free_block += 1; 
     size_t ponteiro_bloco_addr = *next_free_block;
-    *next_free_block += 8; 
+    *next_free_block += 8;
     
     _encode_pointer(ponteiro_bloco_addr, &texture[pai_base_addr * 4], tex_dim);
     
