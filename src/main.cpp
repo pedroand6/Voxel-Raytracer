@@ -19,9 +19,9 @@ extern "C" {
     #include <color.h>
 }
 
-#define WORLD_SIZE_X 64
-#define WORLD_SIZE_Y 64
-#define WORLD_SIZE_Z 64
+#define WORLD_SIZE_X 256
+#define WORLD_SIZE_Y 256
+#define WORLD_SIZE_Z 256
 
 #define WORLD_VOLUME WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z
 
@@ -36,7 +36,7 @@ const char* quad_fs = quadFsSrc.c_str();
 const int screenWidth = 1280;
 const int screenHeight = 720;
 
-Camera camera(glm::vec3(32.0f, 32.0f, 100.0f));
+Camera camera(glm::vec3(32.0f, 32.0f, 20.0f));
 
 // Variáveis para o mouse
 float lastX = screenWidth / 2.0f;
@@ -186,7 +186,7 @@ int main(void)
         {3.0f, 0.0f, 0.0f},  // VOX_STONE
         {1.5f, 0.0f, 0.0f},  // VOX_GLASS
         {2.42f, 0.0f, 0.0f},  // VOX_DIAMOND
-        {1.38f, 0.0f, 1.0f}  // VOX_JELLY
+        {1.38f, 0.0f, 0.0f}  // VOX_JELLY
     };
 
     Voxel_Type VOX_GRASS = 0;

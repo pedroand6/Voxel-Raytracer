@@ -189,7 +189,7 @@ void octree_insert(Octree *tree, Voxel_Object voxel) {
             
             int pos = _get_pos_in_octree(voxel.coord, mid);
             curr = curr->children[pos];
-            continue; 
+            continue;
         }
         
         if (!curr->has_voxel) {

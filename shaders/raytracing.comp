@@ -11,7 +11,7 @@
 // A dimensão da sua folha em texels (baseado no seu C++)
 #define LEAF_SIZE 3
 
-const ivec3 worldSize = ivec3(64, 64, 64);
+const ivec3 worldSize = ivec3(256, 256, 256);
 const int MAX_RAYS = 8;
 const vec4 skyColor = vec4(0.5, 0.7, 1.0, 1.0);
 
@@ -148,22 +148,7 @@ vec4 getNodeData(ivec3 coord) {
     return texelFetch(u_octreeTexture, coord, 0); // 0 = nível de mipmap
 }
 
-struct ParentStack {
-    ivec3 indices[6]; // Max depth ~6 for 64^3
-    int size;
-};
-
-// Structure to track octree traversal state
-struct OctreeState {
-    int nodeIndex;                // Current node linear index in octree
-    int childIndices[6];          // Current child index (0-7)
-    int parentIndices[6];         // Stack of parent node indices (max depth ~6 for 64^3)
-    int depth;                    // Current depth in tree
-    ivec3 nodeMin;                // Min corner of current node's bounds
-    ivec3 nodeMax;                // Max corner of current node's bounds
-};
-
-VoxelData octreeFind(ivec3 worldPos, inout OctreeState state) {
+VoxelData octreeFind(ivec3 worldPos) {
     VoxelData data;
     data.found = false;
     data.color = vec4(0.0);
@@ -177,13 +162,11 @@ VoxelData octreeFind(ivec3 worldPos, inout OctreeState state) {
         return data;
     }
 
-    ivec3 currentNodeCoord = state.nodeIndex == 0 ? ivec3(0,0,0) : fromLinear(state.nodeIndex, tex_dim_int); 
-    ivec3 nodeMin = ivec3(state.nodeMin);
-    ivec3 nodeMax = ivec3(state.nodeMax);
+    ivec3 currentNodeCoord = ivec3(0, 0, 0); 
+    ivec3 nodeMin = ivec3(u_worldBoundsMin);
+    ivec3 nodeMax = ivec3(u_worldBoundsMax) - ivec3(1.0); // max é (63, 63, 63)
 
-    // ivec3 currentNodeCoord = ivec3(0, 0, 0); 
-    // ivec3 nodeMin = ivec3(u_worldBoundsMin);
-    // ivec3 nodeMax = ivec3(u_worldBoundsMax) - ivec3(1.0); // max é (63, 63, 63)
+    int currentSize = worldSize.x; // Começa com o tamanho total (64)
     
     for (int i = 0; i < 32; i++) {
         vec4 nodeData = getNodeData(currentNodeCoord); // Lê o Texel 0 (Cor/Flag)
@@ -203,7 +186,6 @@ VoxelData octreeFind(ivec3 worldPos, inout OctreeState state) {
             //    (Use a mesma lógica de decodePointer, mas só para 3 canais)
             ivec3 leafVoxelCoord = ivec3(round(coordData.rgb * 255.0));
             
-            state.nodeIndex = toLinear(leafVoxelCoord, tex_dim_int);
             // 3. Compare a coordenada da folha com a que estamos procurando
             if (!all(equal(leafVoxelCoord, worldPos))) {
                 // NÃO. É uma folha, mas para um voxel diferente
@@ -221,6 +203,7 @@ VoxelData octreeFind(ivec3 worldPos, inout OctreeState state) {
             vec4 propData = getNodeData(propTexelCoord); // Lê (Ref, Ill, K, _)
             
             data.properties = decodeProperties(propData);
+            data.size = currentSize; // FIXME: Pode estar lá no fim, só se passar na verificação?
             return data;
             // --- FIM DA CORREÇÃO ---
         }
@@ -230,7 +213,6 @@ VoxelData octreeFind(ivec3 worldPos, inout OctreeState state) {
             ivec3 pointerBlockBaseCoord = decodePointer(nodeData.rgb); // Pega a coordenada do primeiro filho deste nó (quando igual a (0,0,0) retorna (0,0,0))
             ivec3 midPoint = (nodeMin + nodeMax) / 2; // Calcula o voxel médio
             int childIndices = getchildIndices(worldPos, midPoint); // Determina o índice do filho em que o voxel está
-            state.childIndices[state.depth] = childIndices; // Atualiza o estado com o índice do filho atual
             
             int linearBaseIndex = toLinear(pointerBlockBaseCoord, tex_dim_int); // Índice linear do primeiro filho
             ivec3 childPointerCoord = fromLinear(linearBaseIndex + childIndices, tex_dim_int); // Coordenada do filho específico (primeiro filho + indice do filho (0 até 7))
@@ -239,14 +221,18 @@ VoxelData octreeFind(ivec3 worldPos, inout OctreeState state) {
             currentNodeCoord = decodePointer(childPointerData.rgb); // Pega a coordenada do primeiro filho do filho do nó anterior
 
             getChildBounds(childIndices, nodeMin, nodeMax); // Atualiza os limites do nó atual
-            // Atualiza o estado da octree
-            state.parentIndices[state.depth] = state.nodeIndex;
-            state.nodeIndex = toLinear(currentNodeCoord, tex_dim_int);
-            state.nodeMin = nodeMin;
-            state.nodeMax = nodeMax;
-            state.depth++;
+            currentSize /= 2; // Reduz o tamanho atual pela metade
+
+            // Se o ponteiro for nulo (nó vazio na árvore esparsa):
+            if (all(equal(currentNodeCoord, ivec3(0,0,0)))) {
+                data.found = false;
+                data.size = currentSize; // <-- Achamos um nó vazio grande!
+                return data;
+            }
         }
     }
+
+    data.size = 1; // Fallback
     return data; 
 }
 
@@ -302,168 +288,122 @@ vec4 accumulateColors(Ray rays[MAX_RAYS]) {
     return vec4(result, 1.0);
 }
 
-// Update octree state when crossing into a new voxel
-bool updateOctreeState(inout OctreeState state, ivec3 newMapPos, out VoxelData voxelData) {
-    // Check if still within current node bounds
-    if (all(greaterThanEqual(newMapPos, state.nodeMin)) && 
-        all(lessThan(newMapPos, state.nodeMax))) {
-        // Still in same node - may need to traverse down
-        voxelData = octreeFind(newMapPos, state);
-        return voxelData.found;
-    }
+bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out vec3 hitPoint, out vec3 hitNormal, out VoxelData prevVoxel, out VoxelData hitVoxel) {
     
-    // Outside current node - go up to find common ancestor
-    while (state.depth > 0) {
-        // Go up one level
-        state.depth--;
-        state.nodeIndex = state.parentIndices[state.depth];
-        int childIdx = state.childIndices[state.depth];
-        ivec3 size = state.nodeMax - state.nodeMin + 1;
+    vec3 rayPos = thisRay.origin;
+    vec3 rayDir = normalize(thisRay.direction);
 
-        // Eixo Z
-        if ((childIdx & 1) == 0) { 
-            // Voxel atrás
-            state.nodeMax.z += size.z; 
-        } else {
-            // Voxel à frente
-            state.nodeMin.z -= size.z;
-        }
+    const float DIR_EPSILON = 1e-8;
+    
+    // Evita divisão por zero
+    vec3 invDir;
+    invDir.x = (abs(rayDir.x) < DIR_EPSILON) ? 1e20 : 1.0 / rayDir.x;
+    invDir.y = (abs(rayDir.y) < DIR_EPSILON) ? 1e20 : 1.0 / rayDir.y;
+    invDir.z = (abs(rayDir.z) < DIR_EPSILON) ? 1e20 : 1.0 / rayDir.z;
 
-        // Eixo Y
-        if ((childIdx & 2) == 0) {
-            // Voxel abaixo
-            state.nodeMax.y += size.y;
-        } else {
-            // Voxel acima
-            state.nodeMin.y -= size.y + 1;
-        }
-
-        // Eixo X
-        if ((childIdx & 4) == 0) {
-            // Voxel à esquerda
-            state.nodeMax.x += size.x;
-        } else {
-            // Voxel à direita
-            state.nodeMin.x -= size.x;
-        }
-
-        // Verifica se a nova posição está dentro deste ancestral
-        if (all(greaterThanEqual(newMapPos, state.nodeMin)) && 
-            all(lessThan(newMapPos, state.nodeMax))) {
-            // Encontramos o ancestral comum, agora descemos até a folha correta
-            voxelData = octreeFind(newMapPos, state);
-            return voxelData.found;
-        }
-        
-        break;
-    }
+    // Pega o estado inicial
+    ivec3 mapPos = ivec3(floor(rayPos));
+    hitVoxel = octreeFind(mapPos);
     
-    // Se subimos até a raiz e ainda estamos fora (ou algo deu errado), reinicia da raiz
-    state.nodeIndex = 0; // Root
-    state.depth = 0;
-    state.nodeMin = ivec3(u_worldBoundsMin);
-    state.nodeMax = ivec3(u_worldBoundsMax) - ivec3(1);
-    
-    // Traverse down to target
-    voxelData = octreeFind(newMapPos, state);
-    return voxelData.found;
-}
-
-bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, 
-                       out vec3 hitPoint, out vec3 hitNormal, 
-                       out VoxelData prevVoxel, out VoxelData hitVoxel) {
-    const float EPS = 1e-6;
-    vec3 origin = thisRay.origin;
-    vec3 dir = normalize(thisRay.direction);
-    
-    ivec3 mapPos = ivec3(floor(origin));
-    prevMapPos = mapPos;
-    
-    // Initialize octree state
-    OctreeState octState;
-    octState.nodeIndex = 0; // Root node
-    octState.depth = 0;
-    octState.nodeMin = ivec3(u_worldBoundsMin);
-    octState.nodeMax = ivec3(u_worldBoundsMax) - ivec3(1);
-    
-    // Initialize parent stack
-    for (int i = 0; i < 6; i++) {
-        octState.parentIndices[i] = -1;
-    }
-
-    // Initialize child stack
-    for (int i = 0; i < 6; i++) {
-        octState.childIndices[i] = -1;
-    }
-    
-    // Get initial voxel
-    //updateOctreeState(octState, mapPos, hitVoxel);
-    hitVoxel = octreeFind(mapPos, octState);
+    // Inicializa prevVoxel na primeira iteração
     prevVoxel = hitVoxel;
+
+    // Epsilon pequeno para cruzar a fronteira
+    const float EPS = 0.0001;
     
-    ivec3 stepSign = ivec3(sign(dir));
-    vec3 tDelta = vec3(
-        abs(dir.x) > EPS ? abs(1.0 / dir.x) : 1e30,
-        abs(dir.y) > EPS ? abs(1.0 / dir.y) : 1e30,
-        abs(dir.z) > EPS ? abs(1.0 / dir.z) : 1e30
-    );
-    
-    vec3 voxelBoundary = floor(origin) + vec3(step(0.0, dir.x), 
-                                               step(0.0, dir.y), 
-                                               step(0.0, dir.z));
-    vec3 tMax = vec3(
-        abs(dir.x) > EPS ? (voxelBoundary.x - origin.x) / dir.x : 1e30,
-        abs(dir.y) > EPS ? (voxelBoundary.y - origin.y) / dir.y : 1e30,
-        abs(dir.z) > EPS ? (voxelBoundary.z - origin.z) / dir.z : 1e30
-    );
-    
-    for (int i = 0; i < 1024; ++i) {
-        // Find next axis to step
-        int axis = 0;
-        if (tMax.x < tMax.y) {
-            axis = (tMax.x < tMax.z) ? 0 : 2;
+    // Define um limite de segurança para o loop
+    for (int i = 0; i < 256; ++i) {
+        
+        // 1. Onde estamos?
+        // Precisamos alinhar a caixa atual com o tamanho retornado pela Octree
+        // Isso é matemática de bitwise (ou float) para alinhar à grade.
+        float size = max(1.0, float(hitVoxel.size));
+        
+        // Acha o canto inferior (min) do cubo atual alinhado ao tamanho 'size'
+        ivec3 voxelMin = ivec3(floor(vec3(mapPos) / size)) * int(size);
+        vec3 boxMin = vec3(voxelMin);
+        vec3 boxMax = boxMin + vec3(size);
+        
+        // 2. Calcule a distância para sair deste cubo (Ray-Box Exit)
+        // (Similar ao tMax do DDA, mas para a caixa atual inteira)
+        vec3 tMax;
+        if (abs(rayDir.x) < DIR_EPSILON) {
+            tMax.x = 1e20; // Ray parallel to YZ plane, never hits X faces
         } else {
-            axis = (tMax.y < tMax.z) ? 1 : 2;
+            tMax.x = (rayDir.x > 0.0) ? (boxMax.x - rayPos.x) : (boxMin.x - rayPos.x);
+            tMax.x *= invDir.x;
         }
         
-        float tHit = 0.0;
+        if (abs(rayDir.y) < DIR_EPSILON) {
+            tMax.y = 1e20; // Ray parallel to XZ plane, never hits Y faces
+        } else {
+            tMax.y = (rayDir.y > 0.0) ? (boxMax.y - rayPos.y) : (boxMin.y - rayPos.y);
+            tMax.y *= invDir.y;
+        }
+        
+        if (abs(rayDir.z) < DIR_EPSILON) {
+            tMax.z = 1e20; // Ray parallel to XY plane, never hits Z faces
+        } else {
+            tMax.z = (rayDir.z > 0.0) ? (boxMax.z - rayPos.z) : (boxMin.z - rayPos.z);
+            tMax.z *= invDir.z;
+        }
+        
+        // 3. Descubra qual face atingimos primeiro (o menor t)
+        // Isso nos dá a NORMAL e a distância do passo.
+        float tStep;
+        int axis;
+        
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            tStep = tMax.x;
+            axis = 0;
+            hitNormal = vec3(-sign(rayDir.x), 0.0, 0.0);
+        } else if (tMax.y < tMax.z) {
+            tStep = tMax.y;
+            axis = 1;
+            hitNormal = vec3(0.0, -sign(rayDir.y), 0.0);
+        } else {
+            tStep = tMax.z;
+            axis = 2;
+            hitNormal = vec3(0.0, 0.0, -sign(rayDir.z));
+        }
+        
+        // Avança o raio para EXATAMENTE a borda
+        // Nota: O 'tStep' é a distância geométrica exata até a parede.
+        rayPos += rayDir * tStep;
+        vec3 hitEndPoint = rayPos;
+
+        // Empurra APENAS o eixo que bateu para dentro do próximo voxel.
+        // Isso evita que erros de arredondamento "vazem" para os outros eixos (Y/Z).
         if (axis == 0) {
-            mapPos.x += stepSign.x;
-            tHit = tMax.x;
-            tMax.x += tDelta.x;
-        } else if (axis == 1) {
-            mapPos.y += stepSign.y;
-            tHit = tMax.y;
-            tMax.y += tDelta.y;
-        } else {
-            mapPos.z += stepSign.z;
-            tHit = tMax.z;
-            tMax.z += tDelta.z;
+            rayPos.x += sign(rayDir.x) * EPS;
+        } 
+        else if (axis == 1) {
+            rayPos.y += sign(rayDir.y) * EPS;
+        } 
+        else {
+            rayPos.z += sign(rayDir.z) * EPS;
         }
+
+        // Atualiza a posição inteira para buscar o próximo voxel
+        prevMapPos = mapPos;
+        mapPos = ivec3(floor(rayPos));
         
-        prevMapPos = mapPos - stepSign * ((axis==0) ? ivec3(1,0,0) : 
-                                          (axis==1) ? ivec3(0,1,0) : 
-                                          ivec3(0,0,1));
-        
+        // Verifica se saiu do mundo
+        if (!isInsideWorld(mapPos)) return false;
+
+        // Salva o estado anterior antes de atualizar
         prevVoxel = hitVoxel;
+        // Busca o NOVO voxel na nova posição
+        hitVoxel = octreeFind(mapPos);
         
-        // Update octree state instead of calling octreeFind
-        updateOctreeState(octState, mapPos, hitVoxel);
-        //hitVoxel = octreeFind(mapPos, octState);
-        
-        float prevRefrac = (prevVoxel.found && prevVoxel.properties[0] > 0.0) ? 
-                           prevVoxel.properties[0] : thisRay.IOF;
-        float currentRefrac = (hitVoxel.found && hitVoxel.properties[0] > 0.0) ? 
-                              hitVoxel.properties[0] : 1.0;
-        
-        bool refracChanged = abs(currentRefrac - prevRefrac) > 1e-4;
-        
-        if (refracChanged && tHit > 1e-5) {
+        // 5. Verifica mudança de meio (lógica de Hit)
+        float prevRefrac = (prevVoxel.found && prevVoxel.properties[0] > 0.0) ? prevVoxel.properties[0] : thisRay.IOF;
+        float currentRefrac = (hitVoxel.found && hitVoxel.properties[0] > 0.0) ? hitVoxel.properties[0] : 1.0;
+
+        if (abs(currentRefrac - prevRefrac) > EPS) {
             hitMapPos = mapPos;
-            hitPoint = origin + dir * tHit;
-            if (axis == 0) hitNormal = vec3(-float(stepSign.x), 0.0, 0.0);
-            else if (axis == 1) hitNormal = vec3(0.0, -float(stepSign.y), 0.0);
-            else hitNormal = vec3(0.0, 0.0, -float(stepSign.z));
+            // O ponto de hit exato é a posição atual (que está na borda)
+            hitPoint = hitEndPoint; 
             return true;
         }
     }
@@ -473,16 +413,10 @@ bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos,
 
 vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
     ivec3 thisMapPos = ivec3(floor(rayOrigin));
-    OctreeState octState;
-    octState.nodeIndex = 0; // Root node
-    octState.depth = 0;
-    octState.nodeMin = ivec3(u_worldBoundsMin);
-    octState.nodeMax = ivec3(u_worldBoundsMax) - ivec3(1);
-    
-    VoxelData thisVoxel = octreeFind(thisMapPos, octState);
+    VoxelData thisVoxel = octreeFind(thisMapPos);
 
     float startIOF = 1.0;
-    if (thisVoxel.found && thisVoxel.properties[0] > 0.0) {
+    if (thisVoxel.found && thisVoxel.properties[0] > 0.0 && thisVoxel.properties[0] < 3.0) {
         startIOF = thisVoxel.properties[0];
     }
 
@@ -502,8 +436,8 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
     rayStack[0].weight = 1.0;
     rayStack[0].colorTint = vec4(1.0);
     rayStack[0].distanceInMedium = 0.0;
-    rayStack[0].mediumColor = vec4(1.0);
-    rayStack[0].mediumDensity = 0.0;
+    rayStack[0].mediumColor = thisVoxel.found ? thisVoxel.color : vec4(1.0);
+    rayStack[0].mediumDensity = thisVoxel.found ? thisVoxel.color.a * 5.0 : 0.0;
     int stackSize = 1;
     int resultSize = 0;
 
