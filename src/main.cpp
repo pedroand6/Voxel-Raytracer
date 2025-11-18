@@ -172,8 +172,8 @@ int main(void)
 
     glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
 
-    glm::vec3 min_bounds(0.0f, 0.0f, 0.0f);
-    glm::vec3 max_bounds(WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z);
+    glm::ivec3 min_bounds(0, 0, 0);
+    glm::ivec3 max_bounds(WORLD_SIZE_X - 1, WORLD_SIZE_Y - 1, WORLD_SIZE_Z - 1);
     Octree* chunk0 = octree_create(NULL, {0,0,0}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
 
     // Lista de todos os tipos de voxels possívels
@@ -186,7 +186,8 @@ int main(void)
         {3.0f, 0.0f, 0.0f},  // VOX_STONE
         {1.5f, 0.0f, 0.0f},  // VOX_GLASS
         {2.42f, 0.0f, 0.0f},  // VOX_DIAMOND
-        {1.38f, 0.0f, 0.0f}  // VOX_JELLY
+        {1.38f, 0.0f, 0.0f},  // VOX_JELLY
+        {3.0f, 0.0f, 1.0f},  // VOX_MIRROR
     };
 
     Voxel_Type VOX_GRASS = 0;
@@ -198,6 +199,7 @@ int main(void)
     Voxel_Type VOX_GLASS = 6;
     Voxel_Type VOX_DIAMOND = 7;
     Voxel_Type VOX_JELLY = 8;
+    Voxel_Type VOX_MIRROR = 9;
 
     // Room parameters (positioned near the center of the world)
     int roomMinX = 12;
@@ -260,6 +262,58 @@ int main(void)
                 if (dx*dx + dy*dy + dz*dz <= radius*radius) {
                     //int index = x + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
                     Voxel_Object voxel = VoxelObjCreate(voxels[VOX_JELLY], make_color_rgba(240, 100, 100, 100), {x, y, z});
+                    octree_insert(chunk0, voxel);
+                }
+            }
+        }
+    }
+
+    // --- Giant soccer ball outside the room ---
+    // Position the ball to the +X side of the room, but still inside world bounds.
+    int ball_cx = roomMaxX + 15;
+    int ball_cz = (roomMinZ + roomMaxZ) / 2 + 8;
+    int ball_cy = floorY + 8;
+    int ball_radius = 12;
+
+    // Ensure the ball center is inside the world; clamp if necessary.
+    if (ball_cx < 0) ball_cx = 0;
+    if (ball_cx >= WORLD_SIZE_X) ball_cx = WORLD_SIZE_X - 1;
+    if (ball_cz < 0) ball_cz = 0;
+    if (ball_cz >= WORLD_SIZE_Z) ball_cz = WORLD_SIZE_Z - 1;
+    if (ball_cy < 0) ball_cy = 0;
+    if (ball_cy >= WORLD_SIZE_Y) ball_cy = WORLD_SIZE_Y - 1;
+
+    // Use a spherical mapping pattern (latitude/longitude quantized) to approximate soccer patches.
+    const float PI = acosf(-1.0f);
+    const float patchAngle = PI / 3.0f; // controls patch size; tweak for different look
+
+    for (int x = ball_cx - ball_radius; x <= ball_cx + ball_radius; ++x) {
+        for (int y = ball_cy - ball_radius; y <= ball_cy + ball_radius; ++y) {
+            for (int z = ball_cz - ball_radius; z <= ball_cz + ball_radius; ++z) {
+                if (x < 0 || x >= WORLD_SIZE_X || y < 0 || y >= WORLD_SIZE_Y || z < 0 || z >= WORLD_SIZE_Z) continue;
+                int dx = x - ball_cx; int dy = y - ball_cy; int dz = z - ball_cz;
+                float dist2 = (float)(dx*dx + dy*dy + dz*dz);
+                if (dist2 > (float)(ball_radius*ball_radius)) continue; // outside sphere
+
+                float rlen = sqrtf(dist2);
+                // Avoid division by zero
+                if (rlen < 1e-6f) rlen = 1e-6f;
+
+                // Spherical coords: theta in [0, 2PI), phi in [0, PI]
+                float theta = atan2f((float)dz, (float)dx) + PI; // [0, 2PI)
+                float phi = acosf(((float)dy) / rlen); // [0, PI]
+
+                int a = (int)floorf(theta / patchAngle);
+                int b = (int)floorf(phi / patchAngle);
+
+                // Checker of latitude/longitude cells gives a soccer-like patch pattern
+                bool whitePatch = ((a + b) & 1) == 0;
+
+                if (whitePatch) {
+                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_STONE], make_color_rgba(240, 240, 240, 255), {x, y, z}); // white
+                    octree_insert(chunk0, voxel);
+                } else {
+                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(20, 20, 20, 255), {x, y, z}); // black
                     octree_insert(chunk0, voxel);
                 }
             }
@@ -456,9 +510,9 @@ int main(void)
 
         glActiveTexture(GL_TEXTURE0 + 2);
         glBindTexture(GL_TEXTURE_3D, textureID);
-        glUniform1f(texDimLoc, (GLfloat)tex_dim);
-        glUniform3fv(minBoundsLoc, 1, (const GLfloat*)&min_bounds);
-        glUniform3fv(maxBoundsLoc, 1, (const GLfloat*)&max_bounds);
+        glUniform1i(texDimLoc, (GLint)tex_dim);
+        glUniform3iv(minBoundsLoc, 1, (const GLint*)&min_bounds);
+        glUniform3iv(maxBoundsLoc, 1, (const GLint*)&max_bounds);
 
         // Dispara os threads do compute shader.
         // Dividimos o tamanho da tela pelo tamanho do grupo de trabalho definido no shader.
