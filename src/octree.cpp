@@ -43,33 +43,33 @@ IVector3 _get_node_size(Octree *node) {
 }
 
 int _get_pos_in_octree(IVector3 coord, IVector3 mid_points) {
-    // Lógica simétrica: Esquerda < mid, Direita >= mid
-    if (coord.x < mid_points.x) { // Esquerda
-        if (coord.y < mid_points.y) { // Baixo
-            if (coord.z < mid_points.z) // Trás
-                return LEFTBOTBACK;
-            else // Frente
-                return LEFTBOTFRONT;
+    // Match GPU: use >= for "right/top/front"
+    if (coord.x >= mid_points.x) { // RIGHT (changed from <)
+        if (coord.y >= mid_points.y) { // TOP
+            if (coord.z >= mid_points.z) // FRONT
+                return RIGHTTOPFRONT;
+            else // BACK
+                return RIGHTTOPBACK;
         }
-        else { // Cima
-            if (coord.z < mid_points.z) // Trás
-                return LEFTTOPBACK;
-            else // Frente
-                return LEFTTOPFRONT;
+        else { // BOTTOM
+            if (coord.z >= mid_points.z) // FRONT
+                return RIGHTBOTFRONT;
+            else // BACK
+                return RIGHTBOTBACK;
         }
     }
-    else { // Direita (coord.x >= mid_points.x)
-        if (coord.y < mid_points.y) { // Baixo
-            if (coord.z < mid_points.z) // Trás
-                return RIGHTBOTBACK;
-            else // Frente
-                return RIGHTBOTFRONT;
+    else { // LEFT (coord.x < mid_points.x)
+        if (coord.y >= mid_points.y) { // TOP
+            if (coord.z >= mid_points.z) // FRONT
+                return LEFTTOPFRONT;
+            else // BACK
+                return LEFTTOPBACK;
         }
-        else { // Cima
-            if (coord.z < mid_points.z) // Trás
-                return RIGHTTOPBACK;
-            else // Frente
-                return RIGHTTOPFRONT;
+        else { // BOTTOM
+            if (coord.z >= mid_points.z) // FRONT
+                return LEFTBOTFRONT;
+            else // BACK
+                return LEFTBOTBACK;
         }
     }
 }
@@ -78,11 +78,11 @@ int _get_pos_in_octree(IVector3 coord, IVector3 mid_points) {
 // Retorna 'true' se a coordenada está FORA dos limites
 bool _coord_is_outside(IVector3 coord, IVector3 left_bot_back, IVector3 right_top_front) {
     return coord.x < left_bot_back.x
-        || coord.x > right_top_front.x
+        || coord.x >= right_top_front.x
         || coord.y < left_bot_back.y
-        || coord.y > right_top_front.y
+        || coord.y >= right_top_front.y
         || coord.z < left_bot_back.z
-        || coord.z > right_top_front.z;
+        || coord.z >= right_top_front.z;
 }
 
 Octree *octree_new(void) {
@@ -134,6 +134,12 @@ int _create_children(Octree *tree, IVector3 mid_points_ignoradas) {
     
     IVector3 min = tree->left_bot_back;
     IVector3 max = tree->right_top_front;
+
+    IVector3 size = ivec3_sub(max, min);
+    if (size.x <= 1 && size.y <= 1 && size.z <= 1) {
+        // não dividir mais
+        return 0;
+    }
     
     // --- INÍCIO DA CORREÇÃO ---
     // Use a matemática de divisão correta que evita o loop infinito.
@@ -373,7 +379,7 @@ void _transform_node_to_texture(Octree *node,
         texture[base + 0] = get_red_rgba(node->voxel.color);
         texture[base + 1] = get_green_rgba(node->voxel.color);
         texture[base + 2] = get_blue_rgba(node->voxel.color);
-        texture[base + 3] = node->has_voxel | 254; //Flag for leaf node
+        texture[base + 3] = 255; //Flag for leaf node
         
         // TEXEL 1: Coordenada do Voxel (XYZ) e Alpha da Cor (A)
         // (Isso assume que as coordenadas do mundo estão entre 0-255)
@@ -386,7 +392,7 @@ void _transform_node_to_texture(Octree *node,
         texture[base + 8] = (uint8_t)(node->voxel.voxel.refraction * (255.0 / 3.0));
         texture[base + 9] = (uint8_t)(node->voxel.voxel.illumination * 255.0);
         texture[base + 10] = (uint8_t)(node->voxel.voxel.k * 255.0);
-        texture[base + 11] = 0; // Não usado
+        texture[base + 11] = 255 * node->has_voxel; // Mostra se é um voxel ou leaf vazio
 
         *next_free_block += LEAF_SIZE;
         // ---- Fim da Lógica da Folha ----
@@ -418,7 +424,7 @@ void _transform_node_to_texture(Octree *node,
     }
 }
 
-uint8_t *octree_texture(Octree *tree, size_t *arr_size) {
+uint8_t *octree_texture(Octree *tree, size_t *arr_size, size_t tex_dim) {
     if(!tree || !arr_size) return NULL;
     
     // _octree_texel_size agora está correto
@@ -435,8 +441,6 @@ uint8_t *octree_texture(Octree *tree, size_t *arr_size) {
     if(!texture) return NULL;
     
     size_t next_free_block = 0;
-    size_t tex_dim = (size_t)ceil(cbrt((double)voxel_count));
-    if(tex_dim == 0) tex_dim = 1;
     
     _transform_node_to_texture(tree, texture, &next_free_block, tex_dim);
 

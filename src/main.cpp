@@ -23,8 +23,6 @@ extern "C" {
 #define WORLD_SIZE_Y 256
 #define WORLD_SIZE_Z 256
 
-#define WORLD_VOLUME WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z
-
 std::string computeSrc = ShaderUtils::readShaderFile("shaders/raytracing.comp");
 std::string quadVsSrc  = ShaderUtils::readShaderFile("shaders/quad.vert");
 std::string quadFsSrc  = ShaderUtils::readShaderFile("shaders/quad.frag");
@@ -64,6 +62,18 @@ unsigned int quadIndices[] = {
     0, 1, 3,   // first triangle
     1, 2, 3    // second triangle
 };
+
+size_t nextPowerOf2(size_t n) {
+    if (n == 0) return 1;
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    n++;
+    return n;
+}
 
 static void error_callback(int error, const char* description)
 {
@@ -173,10 +183,14 @@ int main(void)
     glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
 
     glm::ivec3 min_bounds(0, 0, 0);
-    glm::ivec3 max_bounds(WORLD_SIZE_X - 1, WORLD_SIZE_Y - 1, WORLD_SIZE_Z - 1);
-    Octree* chunk0 = octree_create(NULL, {0,0,0}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
+    glm::ivec3 max_bounds(WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z);
+    Octree* chunk0 = octree_create(NULL, {0, 0, 0}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
+
+    glm::vec4 global_light(1.0f, 1.0f, 1.0f, 1.0f);
+    glm::vec3 light_dir = glm::normalize(glm::vec3(0.3481553f, 0.870388f, 0.3481553f));
 
     // Lista de todos os tipos de voxels possívels
+    // IOF, Illumination, Metallicity
     Voxel voxels[] = {
         {3.0f, 0.0f, 0.0f}, // VOX_GRASS
         {3.0f, 0.0f, 0.0f}, // VOX_DIRT
@@ -254,14 +268,28 @@ int main(void)
     int cz = (roomMinZ + roomMaxZ) / 2;
     int cy = floorY + 6;
     int radius = 5;
-    for (int x = cx - radius; x <= cx + radius; ++x) {
-        for (int y = cy - radius; y <= cy + radius; ++y) {
-            for (int z = cz - radius; z <= cz + radius; ++z) {
+
+    // Add a margin to ensure border voxels are included
+    // A voxel "touches" the sphere if any part of it intersects
+    // The farthest corner of a voxel from its center is sqrt(3)*0.5 ≈ 0.866
+    const float voxelMargin = 0.87f; // Slightly more than sqrt(3)/2
+
+    for (int x = cx - radius - 1; x <= cx + radius + 1; ++x) {
+        for (int y = cy - radius - 1; y <= cy + radius + 1; ++y) {
+            for (int z = cz - radius - 1; z <= cz + radius + 1; ++z) {
                 if (x < 0 || x >= WORLD_SIZE_X || y < 0 || y >= WORLD_SIZE_Y || z < 0 || z >= WORLD_SIZE_Z) continue;
-                int dx = x - cx; int dy = y - cy; int dz = z - cz;
-                if (dx*dx + dy*dy + dz*dz <= radius*radius) {
-                    //int index = x + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_JELLY], make_color_rgba(240, 100, 100, 100), {x, y, z});
+                
+                // Calculate distance from voxel center to sphere center
+                float dx = (float)(x - cx);
+                float dy = (float)(y - cy);
+                float dz = (float)(z - cz);
+                float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+                
+                // Include voxel if it intersects the sphere
+                // (distance from center to voxel center <= radius + margin)
+                if (dist <= (float)radius + voxelMargin) {
+                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_JELLY], 
+                        make_color_rgba(240, 100, 100, 100), {x, y, z});
                     octree_insert(chunk0, voxel);
                 }
             }
@@ -320,18 +348,20 @@ int main(void)
         }
     }
 
+    size_t total_texels = _octree_texel_size(chunk0);
+    size_t raw_dim = (size_t)ceil(cbrt((double)total_texels));
+    size_t tex_dim = nextPowerOf2(raw_dim);
+    if (tex_dim == 0) tex_dim = 1;
+
     // Create Octree texture
     size_t arr_size;
-    uint8_t* texture_data = octree_texture(chunk0, &arr_size);
-
-    // O tex_dim que você calculou
-    size_t tex_dim = (size_t)ceil(cbrt((double)_octree_texel_size(chunk0)));
-    if (tex_dim == 0) tex_dim = 1;
+    uint8_t* texture_data = octree_texture(chunk0, &arr_size, tex_dim);
 
     // --- Carga para a GPU ---
     GLuint textureID;
     glGenTextures(1, &textureID);
-    glBindTexture(GL_TEXTURE_3D, textureID); // <-- Informa que é 3D
+    glActiveTexture(GL_TEXTURE0 + 2); // Garanta a unidade correta
+    glBindTexture(GL_TEXTURE_3D, textureID);
 
     // --- ADICIONE ESTA LINHA ---
     // Informa ao OpenGL que seus dados de pixel estão compactados.
@@ -346,12 +376,12 @@ int main(void)
     glTexImage3D(
         GL_TEXTURE_3D,       // Alvo
         0,                   // Nível de Mipmap
-        GL_RGBA8,            // Formato interno na GPU
+        GL_RGBA8UI,            // Formato interno na GPU
         (GLsizei)tex_dim,    // LARGURA
         (GLsizei)tex_dim,    // ALTURA
         (GLsizei)tex_dim,    // PROFUNDIDADE
         0,                   // Borda
-        GL_RGBA,             // Formato dos seus dados (R,G,B,A)
+        GL_RGBA_INTEGER,             // Formato dos seus dados (R,G,B,A)
         GL_UNSIGNED_BYTE,    // Tipo dos seus dados (uint8_t)
         NULL                 // O ponteiro para o seu array 1D
     );
@@ -359,8 +389,11 @@ int main(void)
     // (Opcional, mas boa prática) Redefina o alinhamento para o padrão
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 
-    // Use GL_NEAREST...
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE); // Importante para 3D
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     // Create PBO
     GLuint pboID;
@@ -393,7 +426,7 @@ int main(void)
                     0,          // Mipmap level
                     0,0,0,          // offset
                     (GLsizei)tex_dim, (GLsizei)tex_dim, (GLsizei)tex_dim,
-                    GL_RGBA,
+                    GL_RGBA_INTEGER,
                     GL_UNSIGNED_BYTE,
                     NULL);
 
@@ -451,6 +484,8 @@ int main(void)
     GLint texDimLoc = glGetUniformLocation(computeProgram, "u_texDim");
     GLint minBoundsLoc = glGetUniformLocation(computeProgram, "u_worldBoundsMin");
     GLint maxBoundsLoc = glGetUniformLocation(computeProgram, "u_worldBoundsMax");
+    GLint globalLightLoc = glGetUniformLocation(computeProgram, "globalLight");
+    GLint lightDirLoc = glGetUniformLocation(computeProgram, "lightDir");
 
     // Configurar os shaders do Quad
     const GLuint quad_vertex_shader = glCreateShader(GL_VERTEX_SHADER);
@@ -470,8 +505,6 @@ int main(void)
     checkProgramLinking(quadProgram);
     glUseProgram(quadProgram);
     glUniform1i(glGetUniformLocation(quadProgram, "screenTexture"), 0);
-
-    //std::cout << (int)get_green_rgba(octree_find(chunk0, {roomMinX, floorY, roomMinZ}).color) << std::endl;
 
     float now, lastTime = 0.0f;
     // Dentro do seu game loop
@@ -496,6 +529,46 @@ int main(void)
         cameraData.invProjection = glm::inverse(projection);
         cameraData.invView = glm::inverse(view);
         cameraData.cameraPos = glm::vec4(camera.Position, 1.0f);
+        
+        // selection + highlight: cast up to 3 voxels in front of the camera on left-click
+        static glm::ivec3 selectedVoxelPos(-1, -1, -1);
+        static bool leftWasDown = false;
+
+        int leftState = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
+        if (leftState == GLFW_PRESS && !leftWasDown) {
+            // on press (not hold) perform a short raycast 1..3 voxels
+            for (int step = 1; step <= 3; ++step) {
+                glm::vec3 samplePos = camera.Position + camera.Front * (float)step;
+                glm::ivec3 ipos = glm::ivec3(glm::floor(samplePos + 0.5f)); // round to nearest voxel center
+
+                // bounds check
+                if (ipos.x < -WORLD_SIZE_X || ipos.x >= WORLD_SIZE_X ||
+                    ipos.y < -WORLD_SIZE_Y || ipos.y >= WORLD_SIZE_Y ||
+                    ipos.z < -WORLD_SIZE_Z || ipos.z >= WORLD_SIZE_Z) continue;
+
+                // Try to get a voxel at ipos from the octree.
+                // Replace `octree_get_voxel` below with the actual retrieval function from your octree API.
+                Octree *result = octree_traverse(chunk0, ray_create(
+                    {(float)ipos.x, (float)ipos.y, (float)ipos.z}, 
+                    {camera.Front.x, camera.Front.y, camera.Front.z}));
+                
+                if(result == NULL) continue;
+
+                printf("Selected voxel at (%d, %d, %d)\n", ipos.x, ipos.y, ipos.z);
+            }
+        }
+        leftWasDown = (leftState == GLFW_PRESS);
+
+        // send selection to compute shader so it can highlight the voxel (shader should use u_selectedVoxel and u_highlightEnabled)
+        GLint selLoc = glGetUniformLocation(computeProgram, "u_selectedVoxel");
+        GLint selEnabledLoc = glGetUniformLocation(computeProgram, "u_highlightEnabled");
+        if (selLoc != -1) {
+            glUniform3iv(selLoc, 1, (const GLint*)&selectedVoxelPos);
+        }
+        if (selEnabledLoc != -1) {
+            int enabled = (selectedVoxelPos.x >= 0) ? 1 : 0;
+            glUniform1i(selEnabledLoc, enabled);
+        }
 
         glBindBuffer(GL_UNIFORM_BUFFER, uboCamera);
         glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(CameraData), &cameraData);
@@ -513,6 +586,8 @@ int main(void)
         glUniform1i(texDimLoc, (GLint)tex_dim);
         glUniform3iv(minBoundsLoc, 1, (const GLint*)&min_bounds);
         glUniform3iv(maxBoundsLoc, 1, (const GLint*)&max_bounds);
+        glUniform4fv(globalLightLoc, 1, (const GLfloat*)&global_light);
+        glUniform3fv(lightDirLoc, 1, (const GLfloat*)&light_dir);
 
         // Dispara os threads do compute shader.
         // Dividimos o tamanho da tela pelo tamanho do grupo de trabalho definido no shader.

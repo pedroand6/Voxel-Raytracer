@@ -1,17 +1,11 @@
 #version 450 core
  
-// O valor normalizado (0.0-1.0) do seu flag de folha (255)
-// 255.0 / 255.0 = 1.0
-#define LEAF_FLAG 1.0 
-
-// O valor normalizado do seu flag de nó interno (0)
-// 0.0 / 255.0 = 0.0
-#define INTERNAL_NODE_FLAG 0.0
+#define LEAF_FLAG 255u 
+#define INTERNAL_NODE_FLAG 0u
 
 // A dimensão da sua folha em texels (baseado no seu C++)
 #define LEAF_SIZE 3
 
-const ivec3 worldSize = ivec3(256, 256, 256);
 const int MAX_RAYS = 8;
 const vec4 skyColor = vec4(0.5, 0.7, 1.0, 1.0);
 
@@ -24,7 +18,7 @@ layout (std140, binding = 1) uniform Camera {
     vec4 cameraPos;
 };
 
-layout (binding = 2) uniform sampler3D u_octreeTexture;
+layout (binding = 2) uniform usampler3D u_octreeTexture;
 
 // A dimensão da sua textura (ex: 256.0 para uma textura 256x256x256)
 uniform int u_texDim;
@@ -32,6 +26,10 @@ uniform int u_texDim;
 // Os cantos min/max do volume total da sua octree no espaço do mundo
 uniform ivec3 u_worldBoundsMin;
 uniform ivec3 u_worldBoundsMax;
+ivec3 worldSize = u_worldBoundsMax - u_worldBoundsMin;
+
+uniform vec4 globalLight;
+uniform vec3 lightDir;
 
 /*
  * Estrutura de Retorno
@@ -40,7 +38,8 @@ uniform ivec3 u_worldBoundsMax;
 struct VoxelData {
     lowp vec4 color;       // Cor (RGBA)
     lowp vec3 properties;  // Refração, Iluminação, K
-    int size;
+    mediump ivec3 nodeMin;
+    mediump ivec3 nodeMax;
 };
 
 /*
@@ -48,17 +47,16 @@ struct VoxelData {
  * Usada para rastreamento de raios.
  */
 struct Ray {
-    vec3 origin;
-    vec3 direction;
-    float IOF;
-    float weight;
+    mediump vec3 origin;
+    mediump vec3 direction;
+    mediump float IOF;
+    mediump float weight;
     bool defined;
     lowp vec4 colorTint;
-    float distanceInMedium;
+    mediump float distanceInMedium;
     lowp vec4 mediumColor;
     lowp float mediumDensity;
 };
-
 
 /*
  * Funções Auxiliares
@@ -74,38 +72,36 @@ ivec3 fromLinear(int index) {
     int tex_dim_sq = u_texDim * u_texDim;
     int z = index / tex_dim_sq;
     int rem = index - z * tex_dim_sq;
-    int y = rem / u_texDim;
-    int x = rem - y * u_texDim;
-    return ivec3(x, y, z);
+    return ivec3(rem - (rem / u_texDim) * u_texDim, rem / u_texDim, z);
 }
 
 // Converte um "ponteiro" (cor RGB 0.0-1.0) de volta para 
 // uma coordenada inteira de texel (ex: [0, 255])
-ivec3 decodePointer(vec3 pointer_rgb) {
-    // Reverte a normalização
-    // (o +0.5 é para arredondamento correto)
-    return ivec3(pointer_rgb * 255.0 + 0.5);
+ivec3 decodePointer(uvec3 pointer_rgb) {
+    // Os valores já são os inteiros corretos (0-255)
+    return ivec3(pointer_rgb);
 }
 
-// Substitua o 'vec3 nodeMidPoint' por 'ivec3 nodeMidPoint'
+// Determina em qual filho (0-7) o voxel do mundo está
 int getchildIndices(ivec3 worldPos, ivec3 nodeMidPoint) {
     // O ponto médio calculado por divisão de inteiros é o INÍCIO do bloco da direita.
-    int gx = int(worldPos.x > nodeMidPoint.x);
-    int gy = int(worldPos.y > nodeMidPoint.y);
-    int gz = int(worldPos.z > nodeMidPoint.z);
-    return gx * 4 + gy * 2 + gz;
+    bvec3 greater = greaterThanEqual(worldPos, nodeMidPoint);
+    return int(greater.x) * 4 + int(greater.y) * 2 + int(greater.z);
 }
 
-// Esta função DEVE espelhar a lógica de 'mid' e os limites do C++
-// A lógica C++ é complexa, mas a divisão do cubo principal é simples:
 void getChildBounds(int childIndices, inout ivec3 nodeMin, inout ivec3 nodeMax) {
-    // Calcula o último voxel da metade "inferior"
-    ivec3 mid = (nodeMin + nodeMax) / 2; 
+    ivec3 mid = nodeMin + (nodeMax - nodeMin) / 2; // half split
 
-    // GPU por algum motivo prefere com operador ternário dessa forma?
-    if ((childIndices & 4) != 0) nodeMin.x = mid.x + 1; else nodeMax.x = mid.x;
-    if ((childIndices & 2) != 0) nodeMin.y = mid.y + 1; else nodeMax.y = mid.y;
-    if ((childIndices & 1) != 0) nodeMin.z = mid.z + 1; else nodeMax.z = mid.z;
+    // Se o bit estiver set => este child é o "lado alto" => min = mid, max = old max
+    // Caso contrário => este child é o "lado baixo" => min = old min, max = mid
+    nodeMin.x = ((childIndices & 4) != 0) ? mid.x : nodeMin.x;
+    nodeMax.x = ((childIndices & 4) != 0) ? nodeMax.x : mid.x;
+
+    nodeMin.y = ((childIndices & 2) != 0) ? mid.y : nodeMin.y;
+    nodeMax.y = ((childIndices & 2) != 0) ? nodeMax.y : mid.y;
+
+    nodeMin.z = ((childIndices & 1) != 0) ? mid.z : nodeMin.z;
+    nodeMax.z = ((childIndices & 1) != 0) ? nodeMax.z : mid.z;
 }
 
 // Converte os dados de propriedade (armazenados como 0-255) de volta
@@ -116,93 +112,94 @@ vec3 decodeProperties(vec4 texel) {
 
 // Obtém o texel de dados de um nó. 
 // texelFetch usa coordenadas inteiras (ivec3).
-vec4 getNodeData(ivec3 coord) {
-    return texelFetch(u_octreeTexture, coord, 0); // 0 = nível de mipmap
+uvec4 getNodeData(ivec3 coord) {
+    // texelFetch em usampler3D retorna uvec4 com os valores exatos (0-255)
+    return texelFetch(u_octreeTexture, coord, 0);
 }
 
 VoxelData octreeFind(ivec3 worldPos) {
-    VoxelData data;
-    data.color = vec4(0.0);
-    data.properties = vec3(0.0);
-    data.size = 1;
-
-    // Early boundary check
-    if (worldPos.x < 0 || worldPos.y < 0 || worldPos.z < 0 ||
-        worldPos.x >= worldSize.x || worldPos.y >= worldSize.y || worldPos.z >= worldSize.z) {
-        return data;
-    }
-
     ivec3 currentNodeCoord = ivec3(0);
     ivec3 nodeMin = u_worldBoundsMin;
     ivec3 nodeMax = u_worldBoundsMax;
-    int currentSize = worldSize.x; // Começa com o tamanho total
+
+    VoxelData data;
+    data.color = vec4(0.0);
+    data.properties = vec3(0.0);
+    data.nodeMin = nodeMin;
+    data.nodeMax = nodeMax;
+
+    // Mantenha suas verificações de borda (u_worldBoundsMin/Max) aqui...
+    if (any(lessThan(worldPos, u_worldBoundsMin)) || any(greaterThanEqual(worldPos, u_worldBoundsMax))) {
+       return data;
+    }
     
     for (int i = 0; i < 16; i++) {
-        vec4 nodeData = getNodeData(currentNodeCoord); // Lê o Texel 0 (Cor/Flag)
+        // LEITURA DIRETA DE INTEIROS
+        uvec4 nodeData = getNodeData(currentNodeCoord); 
+        data.nodeMin = nodeMin;
+        data.nodeMax = nodeMax;
 
-        // É um nó folha?
+        // Comparação direta de inteiros (>= 255u)
         if (nodeData.a >= LEAF_FLAG) {            
-            // 1. Encontre o Texel 1 (Coordenadas)
             int linearIndex = toLinear(currentNodeCoord);
-            ivec3 coordTexelCoord = fromLinear(linearIndex + 1);
-            vec4 coordData = getNodeData(coordTexelCoord); // Lê (X, Y, Z, Cor.a)
-
-            // Decodifique a coordenada armazenada na folha
-            // (Use a mesma lógica de decodePointer, mas só para 3 canais)
-            ivec3 leafVoxelCoord = ivec3(coordData.rgb * 255.0 + 0.5);
             
-            // Compare a coordenada da folha com a que estamos procurando
-            if (all(equal(leafVoxelCoord, worldPos))) {
-                // Esta folha é exatamente o voxel que procuramos.
-                data.color.rgb = nodeData.rgb;  // Cor (do Texel 0)
-                data.color.a = coordData.a;     // Alpha da Cor (do Texel 1)
+            // Lê coordenadas
+            ivec3 coordTexelCoord = fromLinear(linearIndex + 1);
+            uvec4 coordData = getNodeData(coordTexelCoord);
+
+            // Coordenada salva já é inteiro. Apenas cast para ivec3.
+            ivec3 storedCoord = ivec3(coordData.rgb);
+
+            // Lê Propriedades
+            ivec3 propTexelCoord = fromLinear(linearIndex + 2);
+            uvec4 propData = getNodeData(propTexelCoord);
+
+            if (all(equal(storedCoord, worldPos)) && propData.a == 255u) {
+                // Precisamos converter a cor de volta para float (0.0-1.0) para o raymarcher
+                data.color.rgb = vec3(nodeData.rgb) / 255.0;
+                data.color.a = float(coordData.a) / 255.0;
                 
-                ivec3 propTexelCoord = fromLinear(linearIndex + 2); // Lê (Ref, Ill, K, _)
-                vec4 propData = getNodeData(propTexelCoord);
-                data.properties = decodeProperties(propData);
-                data.size = currentSize;
+                // decodeProperties original esperava vec4 float. Adaptamos:
+                vec4 propDataFloat = vec4(propData) / 255.0;
+                data.properties = decodeProperties(propDataFloat);
+
                 return data;
             }
-
-            return data; // Não é o voxel que procuramos
+            return data;
         }
 
-        // É um nó interno?
+        // Nó Interno
         if (nodeData.a <= INTERNAL_NODE_FLAG) {
-            ivec3 pointerBlockBaseCoord = decodePointer(nodeData.rgb); // Pega a coordenada do primeiro filho deste nó (quando igual a (0,0,0) retorna (0,0,0))
-            ivec3 midPoint = (nodeMin + nodeMax) / 2; // Calcula o voxel médio
-            int childIndices = getchildIndices(worldPos, midPoint); // Determina o índice do filho em que o voxel está
+            // Pega ponteiro direto (sem conversão de cor)
+            ivec3 pointerBlockBaseCoord = decodePointer(nodeData.rgb);
+            ivec3 midPoint = nodeMin + ((nodeMax - nodeMin) >> 1); // Divisão por 2 via shift é mais rápida
+            int childIndices = getchildIndices(worldPos, midPoint);
             
-            int linearBaseIndex = toLinear(pointerBlockBaseCoord); // Índice linear do primeiro filho
-            ivec3 childPointerCoord = fromLinear(linearBaseIndex + childIndices); // Coordenada do filho específico (primeiro filho + indice do filho (0 até 7))
+            int linearBaseIndex = toLinear(pointerBlockBaseCoord);
+            ivec3 childPointerCoord = fromLinear(linearBaseIndex + childIndices);
             
-            vec4 childPointerData = getNodeData(childPointerCoord); // Lê o Texel 0 do filho em que o voxel está (Ponteiro RGB + Flag A)
-            ivec3 nextNode = decodePointer(childPointerData.rgb); // Pega a coordenada do primeiro filho do filho do nó anterior
+            uvec4 childPointerData = getNodeData(childPointerCoord);
+            ivec3 nextNode = decodePointer(childPointerData.rgb);
 
-            // Sai antes pra quando tiver vazio
             if (all(equal(nextNode, ivec3(0)))) {
-                data.size = currentSize / 2;
+                data.nodeMax = nodeMax;
+                data.color = vec4(0.0); // Mark as empty
                 return data;
             }
 
             currentNodeCoord = nextNode;
-            currentSize = max(1, currentSize / 2); // Reduz o tamanho atual pela metade
-            getChildBounds(childIndices, nodeMin, nodeMax); // Atualiza os limites do nó atual
+            getChildBounds(childIndices, nodeMin, nodeMax);
             continue;
         }
-
-        // se estrutura corrompida, sai
         return data;
     }
-
     return data;
 }
 
 // --- Raymarching ---
 
 bool isInsideWorld(ivec3 c) {
-    return (c.x >= 0) && (c.y >= 0) && (c.z >= 0) &&
-           (c.x < worldSize.x) && (c.y < worldSize.y) && (c.z < worldSize.z);
+    return all(greaterThanEqual(c, u_worldBoundsMin)) && all(lessThan(c, u_worldBoundsMax));
 }
 
 bool addRay(inout Ray rays[MAX_RAYS], Ray ray, inout int stackSize) {
@@ -211,24 +208,29 @@ bool addRay(inout Ray rays[MAX_RAYS], Ray ray, inout int stackSize) {
     return true;
 }
 
+
 vec4 accumulateColors(Ray rays[MAX_RAYS], int rayCount) {
     vec3 result = vec3(0.0);
     float totalWeight = 0.0;
     
-    for (int i = 0; i < rayCount; ++i) {
-        if (!rays[i].defined) continue;
-        result += rays[i].colorTint.rgb * rays[i].weight;
-        totalWeight += rays[i].weight;
-    }
+    // OTIMIZADO: Loop unrolling manual para MAX_RAYS=8
+    if (rayCount > 0 && rays[0].defined) { result += rays[0].colorTint.rgb * rays[0].weight;}
+    if (rayCount > 1 && rays[1].defined) { result += rays[1].colorTint.rgb * rays[1].weight;}
+    if (rayCount > 2 && rays[2].defined) { result += rays[2].colorTint.rgb * rays[2].weight;}
+    if (rayCount > 3 && rays[3].defined) { result += rays[3].colorTint.rgb * rays[3].weight;}
+    if (rayCount > 4 && rays[4].defined) { result += rays[4].colorTint.rgb * rays[4].weight;}
+    if (rayCount > 5 && rays[5].defined) { result += rays[5].colorTint.rgb * rays[5].weight;}
+    if (rayCount > 6 && rays[6].defined) { result += rays[6].colorTint.rgb * rays[6].weight;}
+    if (rayCount > 7 && rays[7].defined) { result += rays[7].colorTint.rgb * rays[7].weight;}
 
-    return totalWeight > 1e-6 ? vec4(result / max(totalWeight, 1.0), 1.0) : vec4(0.0, 0.0, 0.0, 1.0);
+    return vec4(result, 1.0);
 }
 
-bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out vec3 hitPoint, out vec3 hitNormal, out VoxelData prevVoxel, out VoxelData hitVoxel) {
+bool hitMarching(vec3 rayOrigin, vec3 rayDir, float rayIOF, out ivec3 hitMapPos, out vec3 hitPoint, out vec3 hitNormal, out VoxelData prevVoxel, out VoxelData hitVoxel) {
     
-    vec3 rayPos = thisRay.origin;
-    float invLen = inversesqrt(dot(thisRay.direction, thisRay.direction));
-    vec3 rayDir = thisRay.direction * invLen;
+    vec3 rayPos = rayOrigin;
+    float invLen = inversesqrt(dot(rayDir, rayDir));
+    rayDir *= invLen;
 
     // Epsilon pequeno para cruzar a fronteira
     const float DIR_EPSILON = 1e-8;
@@ -248,55 +250,32 @@ bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out 
     prevVoxel = hitVoxel;
     
     // Define um limite de segurança para o loop
-    for (int i = 0; i < 256; ++i) {
-        // 1. Onde estamos?
-        // Precisamos alinhar a caixa atual com o tamanho retornado pela Octree
-        // Isso é matemática de bitwise (ou float) para alinhar à grade.
-        float sizeF = max(1.0, float(hitVoxel.size));
-        int isize = int(sizeF);
-        
-        // Acha o canto inferior (min) do cubo atual alinhado ao tamanho 'size'
-        ivec3 voxelMin = (mapPos / isize) * isize;
-        vec3 boxMin = vec3(voxelMin);
-        vec3 boxMax = boxMin + vec3(sizeF);
+    for (int i = 0; i < 1024; ++i) {
+        vec3 boxMin = vec3(hitVoxel.nodeMin);
+        vec3 boxMax = vec3(hitVoxel.nodeMax);
         
         // 2. Calcule a distância para sair deste cubo (Ray-Box Exit)
         // (Similar ao tMax do DDA, mas para a caixa atual inteira)
-        vec3 pickMax;
-        pickMax.x = (rayDir.x > 0.0) ? boxMax.x : boxMin.x;
-        pickMax.y = (rayDir.y > 0.0) ? boxMax.y : boxMin.y;
-        pickMax.z = (rayDir.z > 0.0) ? boxMax.z : boxMin.z;
-        vec3 tMax = (pickMax - rayPos) * invDir;
+        vec3 tMax = ((mix(boxMin, boxMax, greaterThan(rayDir, vec3(0.0)))) - rayPos) * invDir;
         
         // 3. Descubra qual face atingimos primeiro (o menor t)
         // Isso nos dá a NORMAL e a distância do passo.
-        float tStep;
-        int axis;
-        
-        if (tMax.x < tMax.y && tMax.x < tMax.z) {
-            tStep = tMax.x;
-            axis = 0;
-            hitNormal = vec3(-sign(rayDir.x), 0.0, 0.0);
-        } else if (tMax.y < tMax.z) {
-            tStep = tMax.y;
-            axis = 1;
-            hitNormal = vec3(0.0, -sign(rayDir.y), 0.0);
-        } else {
-            tStep = tMax.z;
-            axis = 2;
-            hitNormal = vec3(0.0, 0.0, -sign(rayDir.z));
-        }
+        float tStep = min(tMax.x, min(tMax.y, tMax.z));
+        int axis = (tMax.x < tMax.y) ? ((tMax.x < tMax.z) ? 0 : 2) : ((tMax.y < tMax.z) ? 1 : 2);
+        hitNormal = vec3(0.0);
+        hitNormal[axis] = -sign(rayDir[axis]);
         
         // Avança o raio para EXATAMENTE a borda
         // Nota: O 'tStep' é a distância geométrica exata até a parede.
         rayPos += rayDir * tStep;
-        vec3 hitEndPoint = rayPos;
 
-        // Empurra APENAS o eixo que bateu para dentro do próximo voxel
-        rayPos[axis] += sign(rayDir[axis]) * EPS;
+        vec3 stepDir = sign(rayDir);
 
-        // Atualiza a posição inteira para buscar o próximo voxel
-        prevMapPos = mapPos;
+        // Se o raio for perfeitamente alinhado, a matemática acima é segura.
+        // Mas para garantir que cruzamos a face no eixo correto:
+        rayPos[axis] += stepDir[axis] * EPS;
+
+        // Recalcula mapPos baseado no ponto levemente penetrado
         mapPos = ivec3(floor(rayPos));
         
         // Verifica se saiu do mundo
@@ -308,13 +287,13 @@ bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out 
         hitVoxel = octreeFind(mapPos);
         
         // 5. Verifica mudança de meio (lógica de Hit)
-        float prevRefrac = (prevVoxel.color.a > 0.0 && prevVoxel.properties[0] > 0.0) ? prevVoxel.properties[0] : thisRay.IOF;
+        float prevRefrac = (prevVoxel.color.a > 0.0 && prevVoxel.properties[0] > 0.0) ? prevVoxel.properties[0] : rayIOF;
         float currentRefrac = (hitVoxel.color.a > 0.0 && hitVoxel.properties[0] > 0.0) ? hitVoxel.properties[0] : 1.0;
 
         if (abs(currentRefrac - prevRefrac) > EPS) {
             hitMapPos = mapPos;
             // O ponto de hit exato é a posição atual (que está na borda)
-            hitPoint = hitEndPoint; 
+            hitPoint = rayPos;
             return true;
         }
     }
@@ -325,21 +304,26 @@ bool hitMarching(in Ray thisRay, out ivec3 hitMapPos, out ivec3 prevMapPos, out 
 // Simplified raymarch just for occlusion
 bool inShadow(vec3 origin, vec3 lightDir, float maxDist) {
     vec3 rayPos = origin;
-    vec3 invDir = 1.0 / (abs(lightDir) + 1e-8);
+
+    const float DIR_EPSILON = 1e-8;
+    const float EPS = 0.001;
+
+    vec3 invDir;
+    invDir.x = (abs(lightDir.x) < DIR_EPSILON) ? 1e20 : 1.0 / lightDir.x;
+    invDir.y = (abs(lightDir.y) < DIR_EPSILON) ? 1e20 : 1.0 / lightDir.y;
+    invDir.z = (abs(lightDir.z) < DIR_EPSILON) ? 1e20 : 1.0 / lightDir.z;
+
     ivec3 mapPos = ivec3(floor(rayPos));
-    const float EPS = 0.0001;
     float distTraveled = 0.0;
+    VoxelData vox;
 
     for (int i = 0; i < 32; ++i) {
-        VoxelData vox = octreeFind(mapPos);
+        vox = octreeFind(mapPos);
         
         if (vox.color.a > 0.1) return true;
-        
-        float sizeF = max(1.0, float(vox.size));
-        int isize = int(sizeF);
-        ivec3 voxelMin = (mapPos / isize) * isize;
-        vec3 boxMin = vec3(voxelMin);
-        vec3 boxMax = boxMin + vec3(sizeF);
+
+        vec3 boxMin = vec3(vox.nodeMin);
+        vec3 boxMax = vec3(vox.nodeMax);
         
         vec3 pickMax;
         pickMax.x = (lightDir.x > 0.0) ? boxMax.x : boxMin.x;
@@ -378,7 +362,7 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
     float invLen = inversesqrt(dot(rayDir, rayDir));
     rayDir = rayDir * invLen;
     rayStack[0] = Ray(
-        rayOrigin, rayDir, startIOF, 1.0, true, vec4(1.0), 0.0,
+        rayOrigin, rayDir, startIOF, 1.0, true, globalLight, 0.0,
         thisVoxel.color.a > 0.0 ? thisVoxel.color : vec4(1.0),
         thisVoxel.color.a * 5.0
     );
@@ -391,13 +375,12 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         
         if (!currentRay.defined) continue;
 
-        vec3 rayStartPoint = currentRay.origin;
-        ivec3 mapPos, prevMapPos;
+        ivec3 mapPos;
         vec3 hitPoint, hitNormal;
-        VoxelData lastVoxel;
-        VoxelData hitVoxel;
+        VoxelData lastVoxel, hitVoxel;
         
-        bool hit = hitMarching(currentRay, mapPos, prevMapPos, hitPoint, hitNormal, lastVoxel, hitVoxel);
+        bool hit = hitMarching(currentRay.origin, currentRay.direction, currentRay.IOF,
+                              mapPos, hitPoint, hitNormal, lastVoxel, hitVoxel);
 
         if (!hit) {
             // Apply Beer's Law and add to results
@@ -418,34 +401,23 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         }
 
         // Update distance traveled through current medium
-        float segmentDistance = length(hitPoint - rayStartPoint);
-        currentRay.distanceInMedium += segmentDistance;
-
-        vec4 voxelColor = hitVoxel.color;
-        vec4 lastVoxelColor = lastVoxel.color;
+        currentRay.distanceInMedium += length(hitPoint - currentRay.origin);
         
         if (hitVoxel.color.a <= 0.0) hitVoxel.properties = vec3(1.0, 0.0, 0.0);
         if (lastVoxel.color.a <= 0.0) lastVoxel.properties = currentRay.IOF > 0.0 ? vec3(0.0) : vec3(1.0, 0.0, 0.0);
 
         vec3 normal = length(hitNormal) > 0.0 ? hitNormal : vec3(0.0, 1.0, 0.0);
-        vec3 lightDir = vec3(0.3481553, 0.870388, 0.3481553);
-
-        float ambientStrength = 0.2;
-        float diff = max(dot(normal, lightDir), 0.0);
-        vec3 finalLight = vec3(ambientStrength);
-        
+        vec3 finalLight = vec3(0.2);
         if (!inShadow(hitPoint + normal * 1e-3, lightDir, 256.0)) {
-            finalLight += vec3(diff);
+            finalLight += vec3(max(dot(normal, lightDir), 0.0));
         }
         
         // Determine surface color based on which side we're hitting
-        vec4 surfaceColor = voxelColor.a > 0.0 ? voxelColor : lastVoxelColor;
-        float surfaceAlpha = surfaceColor.a;
-        float refracIndex = hitVoxel.properties[0] > 0.0 ? hitVoxel.properties[0] : 1.0;
-        float prevRefracIndex = lastVoxel.properties[0] > 0.0 ? lastVoxel.properties[0] : 1.0;
+        vec4 surfaceColor = hitVoxel.color.a > 0.0 ? hitVoxel.color : lastVoxel.color;
+        float n2 = hitVoxel.properties[0] > 0.0 ? hitVoxel.properties[0] : 1.0;
+        float n1 = lastVoxel.properties[0] > 0.0 ? lastVoxel.properties[0] : 1.0;
 
         vec3 incidentDir = currentRay.direction;
-        vec3 n = normal;
 
         // Apply Beer's Law
         vec4 transmittedColor = currentRay.colorTint;
@@ -456,22 +428,18 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
         }
 
         // === TRANSPARENT/TRANSLUCENT SURFACES ===
-        if (surfaceAlpha < 1) {
-            float cosi = dot(incidentDir, n);
-            float n1 = prevRefracIndex;
-            float n2 = refracIndex;
+        if (surfaceColor.a < 1) {
+            float cosi = dot(incidentDir, normal);
             
             if (cosi > 0.0) {
-                n = -n;
+                normal = -normal;
                 float tmp = n1; n1 = n2; n2 = tmp;
             }
-            
-            float eta = n1 / n2;
-            vec3 refractDir = refract(incidentDir, n, eta);
-            vec3 reflectDir = reflect(incidentDir, n);
 
-            float R0 = pow((n1 - n2) / (n1 + n2), 2.0);
-            float cosTheta = max(0.0, dot(-incidentDir, n));
+            vec3 refractDir = refract(incidentDir, normal, n1 / n2);
+
+            float R0 = (n1 - n2) / (n1 + n2) * (n1 - n2) / (n1 + n2);
+            float cosTheta = max(0.0, dot(-incidentDir, normal));
             float fresnel = clamp(R0 + (1.0 - R0) * pow(1.0 - cosTheta, 5.0), 0.0, 1.0);
 
             bool hasTIR = length(refractDir) < 0.001;
@@ -495,18 +463,18 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
                 float reflectWeight = currentRay.weight * reflectIntensity;
                 if (reflectWeight > 1e-4)
                     rayStack[stackSize++] = Ray(
-                        hitPoint + n * 1e-4, reflectDir, n1,
+                        hitPoint + normal * 1e-4, reflect(incidentDir, normal), n1,
                         reflectWeight, true,
-                        transmittedColor, 0.0, lastVoxelColor, lastVoxelColor.a * 5.0
+                        transmittedColor, 0.0, lastVoxel.color, lastVoxel.color.a * 5.0
                     );
             }
 
             // ---- Refraction ray ----
             if (refractIntensity > 0.001 && stackSize < MAX_RAYS && !hasTIR) {
                 rayStack[stackSize++] = Ray(
-                    hitPoint - n * 1e-4, refractDir, n2,
+                    hitPoint - normal * 1e-4, refractDir, n2,
                     currentRay.weight * refractIntensity, true,
-                    transmittedColor, 0.0, voxelColor, voxelColor.a * 5.0
+                    transmittedColor, 0.0, hitVoxel.color, hitVoxel.color.a * 5.0
                 );
             }
         }
@@ -533,7 +501,7 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
                 float reflectWeight = currentRay.weight * specularFactor;
                 if (reflectWeight > 1e-4) {
                     rayStack[stackSize++] = Ray(
-                        hitPoint + normal * 1e-4, reflectDir, prevRefracIndex,
+                        hitPoint + normal * 1e-4, reflectDir, n1,
                         reflectWeight, true,
                         transmittedColor, 0.0, vec4(1.0), 0.0
                     );
