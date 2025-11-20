@@ -253,10 +253,9 @@ bool hitMarching(vec3 rayOrigin, vec3 rayDir, float rayIOF, out ivec3 hitMapPos,
     for (int i = 0; i < 1024; ++i) {
         vec3 boxMin = vec3(hitVoxel.nodeMin);
         vec3 boxMax = vec3(hitVoxel.nodeMax);
-        
-        // 2. Calcule a distância para sair deste cubo (Ray-Box Exit)
-        // (Similar ao tMax do DDA, mas para a caixa atual inteira)
-        vec3 tMax = ((mix(boxMin, boxMax, greaterThan(rayDir, vec3(0.0)))) - rayPos) * invDir;
+
+        float voxelSize = max(1.0, (boxMax.x - boxMin.x) * 0.125);
+        vec3 tMax = (step(0.0, rayDir) - fract((rayPos - boxMin) / voxelSize)) * invDir * voxelSize;
         
         // 3. Descubra qual face atingimos primeiro (o menor t)
         // Isso nos dá a NORMAL e a distância do passo.
