@@ -328,7 +328,7 @@ int main(void)
                 if (rlen < 1e-6f) rlen = 1e-6f;
 
                 // Spherical coords: theta in [0, 2PI), phi in [0, PI]
-                float theta = atan2f((float)dz, (float)dx) + PI; // [0, 2PI)
+                float theta = atan2f((float)dz, (float)dx) + PI; // [0, 2PI) 
                 float phi = acosf(((float)dy) / rlen); // [0, PI]
 
                 int a = (int)floorf(theta / patchAngle);

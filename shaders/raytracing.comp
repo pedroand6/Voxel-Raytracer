@@ -301,7 +301,7 @@ bool hitMarching(vec3 rayOrigin, vec3 rayDir, float rayIOF, out ivec3 hitMapPos,
 }
 
 // Simplified raymarch just for occlusion
-bool inShadow(vec3 origin, vec3 lightDir, float maxDist) {
+bool inShadow(vec3 origin, vec3 lightDir) {
     vec3 rayPos = origin;
 
     const float DIR_EPSILON = 1e-8;
@@ -313,7 +313,6 @@ bool inShadow(vec3 origin, vec3 lightDir, float maxDist) {
     invDir.z = (abs(lightDir.z) < DIR_EPSILON) ? 1e20 : 1.0 / lightDir.z;
 
     ivec3 mapPos = ivec3(floor(rayPos));
-    float distTraveled = 0.0;
     VoxelData vox;
 
     for (int i = 0; i < 32; ++i) {
@@ -323,21 +322,17 @@ bool inShadow(vec3 origin, vec3 lightDir, float maxDist) {
 
         vec3 boxMin = vec3(vox.nodeMin);
         vec3 boxMax = vec3(vox.nodeMax);
-        
-        vec3 pickMax;
-        pickMax.x = (lightDir.x > 0.0) ? boxMax.x : boxMin.x;
-        pickMax.y = (lightDir.y > 0.0) ? boxMax.y : boxMin.y;
-        pickMax.z = (lightDir.z > 0.0) ? boxMax.z : boxMin.z;
-        vec3 tMax = (pickMax - rayPos) * invDir;
+
+        float voxelSize = max(1.0, (boxMax.x - boxMin.x) * 0.125);
+        vec3 tMax = (step(0.0, lightDir) - fract((rayPos - boxMin) / voxelSize)) * invDir * voxelSize;
         float tStep = min(tMax.x, min(tMax.y, tMax.z));
         int axis = (tMax.x < tMax.y) ? ((tMax.x < tMax.z) ? 0 : 2) : ((tMax.y < tMax.z) ? 1 : 2);
         
         rayPos += lightDir * tStep;
         rayPos[axis] += sign(lightDir[axis]) * EPS;
         mapPos = ivec3(floor(rayPos));
-        
-        distTraveled += tStep;
-        if (!isInsideWorld(mapPos) || distTraveled > maxDist) return false;
+
+        if (!isInsideWorld(mapPos)) return false;
     }
     return false;
 }
@@ -407,7 +402,7 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
 
         vec3 normal = length(hitNormal) > 0.0 ? hitNormal : vec3(0.0, 1.0, 0.0);
         vec3 finalLight = vec3(0.2);
-        if (!inShadow(hitPoint + normal * 1e-3, lightDir, 256.0)) {
+        if (!inShadow(hitPoint + normal * 1e-3, lightDir)) {
             finalLight += vec3(max(dot(normal, lightDir), 0.0));
         }
         
