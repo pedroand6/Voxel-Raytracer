@@ -18,8 +18,11 @@ typedef union _vec2 {
     };
 } Vector2;
 
+#include "ivec2.h"
+
 Vector2 vec2_float(float x, float y);
 Vector2 vec2_vec2(Vector2 vec);
+Vector2 vec2_ivec2(IVector2 vec);
 Vector2 vec2_zero(void);
 Vector2 vec2_one(void);
 Vector2 vec2_left(void);

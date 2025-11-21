@@ -4,8 +4,16 @@
 #include "vec3.h"
 #include "vec4.h"
 
-typedef struct _mat4 {
-    float m[16];
+typedef struct {
+    union {
+        float mat[16];
+        struct {
+            float a, b, c, d,
+                  e, f, g, h,
+                  i, j, k, l,
+                  m, n, o, p;
+        };
+    };
 } Mat4;
 
 Mat4 mat4(float val);
@@ -17,6 +25,10 @@ Mat4 mat4_sub(Mat4 a, Mat4 b);
 
 Mat4 mat4_mul(Mat4 a, Mat4 b);
 Vector4 mat4_vec4(Mat4 a, Vector4 b);
+
+float mat4_det(Mat4 in);
+Mat4 mat4_transp(Mat4 in);
+Mat4 mat4_inverse(Mat4 in);
 
 Mat4 mat4_scale(float s1, float s2, float s3);
 Mat4 mat4_translation(float t1, float t2, float t3);
