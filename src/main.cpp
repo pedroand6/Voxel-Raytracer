@@ -198,27 +198,27 @@ void checkProgramLinking(GLuint program) {
 // Lista de todos os tipos de voxels possívels
 // IOF, Illumination, Metallicity
 Voxel voxels[] = {
-    {3.0f, 0.0f, 0.0f}, // VOX_GRASS
-    {3.0f, 0.0f, 0.0f}, // VOX_DIRT
-    {3.0f, 0.0f, 0.0f}, // VOX_WOOD
-    {3.0f, 0.0f, 0.0f}, // VOX_LEAVES
-    {1.33f, 0.0f, 0.0f}, // VOX_WATER
-    {3.0f, 0.0f, 0.0f},  // VOX_STONE
-    {1.5f, 0.0f, 0.0f},  // VOX_GLASS
+    {3.0f, 0.0f, 0.0f},   // VOX_SNOW (Matte, bright)
+    {3.0f, 0.0f, 0.0f},   // VOX_DIRT
+    {3.0f, 0.0f, 0.0f},   // VOX_DARK_WOOD (Trunks)
+    {3.0f, 0.0f, 0.0f},   // VOX_SAKURA_LEAVES
+    {1.33f, 0.0f, 0.0f},  // VOX_WATER
+    {3.0f, 0.0f, 0.0f},   // VOX_QUARTZ (House structure)
+    {1.52f, 0.0f, 0.0f},  // VOX_CLEAR_GLASS (High transparency)
     {2.42f, 0.0f, 0.0f},  // VOX_DIAMOND
-    {1.38f, 0.0f, 0.0f},  // VOX_JELLY
-    {3.0f, 0.0f, 1.0f},  // VOX_MIRROR
+    {1.38f, 2.0f, 0.0f},  // VOX_LANTERN (Glowing)
+    {3.0f, 0.0f, 1.0f},   // VOX_MIRROR
 };
 
-Voxel_Type VOX_GRASS = 0;
+Voxel_Type VOX_SNOW = 0;
 Voxel_Type VOX_DIRT = 1;
-Voxel_Type VOX_WOOD = 2;
-Voxel_Type VOX_LEAVES = 3;
+Voxel_Type VOX_DARK_WOOD = 2;
+Voxel_Type VOX_SAKURA_LEAVES = 3;
 Voxel_Type VOX_WATER = 4;
-Voxel_Type VOX_STONE = 5;
-Voxel_Type VOX_GLASS = 6;
+Voxel_Type VOX_QUARTZ = 5;
+Voxel_Type VOX_CLEAR_GLASS = 6;
 Voxel_Type VOX_DIAMOND = 7;
-Voxel_Type VOX_JELLY = 8;
+Voxel_Type VOX_LANTERN = 8;
 Voxel_Type VOX_MIRROR = 9;
 
 // Colors for the materials above (Simplification)
@@ -385,204 +385,158 @@ int main(void)
     glm::vec4 global_light(1.0f, 1.0f, 1.0f, 1.0f);
     glm::vec3 light_dir = glm::normalize(glm::vec3(0.3481553f, 0.870388f, 0.3481553f));
 
-    // --- CONSTRUCTION START ---
-
-    // Define Ground Level
-    int groundY = 32;
-
-    // Define Lake Parameters
-    int lakeCenterX = 190;
-    int lakeCenterZ = 190;
-    int lakeRadius = 45;
-
-    // Define House Parameters
-    // Character size: 16H, 12W.
-    // House needs to be significantly larger.
-    int houseMinX = 80;
-    int houseMaxX = 140; // 60 voxels wide
-    int houseMinZ = 80;
-    int houseMaxZ = 140; // 60 voxels deep
-    int houseFloorY = groundY;
-    int houseCeilingY = groundY + 30; // 30 voxels high (plenty of headroom for 16 voxel char)
+    // --- SCENE GENERATION: SNOWY SAKURA & GLASS MANSION ---
     
-    // Doorway parameters (Z-Front side)
-    // Width: 16 voxels (Character is 12W, so +4 clearance)
-    // Height: 20 voxels (Character is 16H, so +4 clearance)
-    int doorWidth = 16; 
-    int doorHeight = 20; 
-    int doorMinX = (houseMinX + houseMaxX) / 2 - (doorWidth / 2);
-    int doorMaxX = (houseMinX + houseMaxX) / 2 + (doorWidth / 2);
-
-    // 1. Generate Terrain (Field + Lake)
+    // 1. BASE TERRAIN (Snow Plane)
+    int groundLevel = 18;
     for (int x = 0; x < WORLD_SIZE_X; ++x) {
         for (int z = 0; z < WORLD_SIZE_Z; ++z) {
-            
-            // Calculate distance to lake center
-            float dx = (float)(x - lakeCenterX);
-            float dz = (float)(z - lakeCenterZ);
-            float dist = sqrtf(dx*dx + dz*dz);
-
-            if (dist < lakeRadius) {
-                // Lake generation
-                // Deep dirt bed
-                for(int y = 0; y < groundY - 4; ++y) {
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_STONE], make_color_rgba(80, 80, 80, 255), {x, y, z});
-                    octree_insert(chunk0, voxel);
-                }
-                // Sand/Dirt bottom
-                for(int y = groundY - 4; y < groundY - 2; ++y) {
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_DIRT], make_color_rgba(150, 140, 80, 255), {x, y, z});
-                    octree_insert(chunk0, voxel);
-                }
-                // Water
-                for(int y = groundY - 2; y <= groundY - 1; ++y) {
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WATER], make_color_rgba(60, 100, 220, 150), {x, y, z});
-                    octree_insert(chunk0, voxel);
-                }
-            } else {
-                // Regular Grass Field
-                // Stone base
-                for(int y = 0; y < groundY - 3; ++y) {
-                     // Optimization: Only fill if needed, or fill solid. 
-                     // Just filling top layers to save memory if map is huge, but here we fill all.
-                     Voxel_Object voxel = VoxelObjCreate(voxels[VOX_STONE], make_color_rgba(80, 80, 80, 255), {x, y, z});
-                     octree_insert(chunk0, voxel);
-                }
-                // Dirt layer
-                for(int y = groundY - 3; y < groundY; ++y) {
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_DIRT], make_color_rgba(100, 70, 40, 255), {x, y, z});
-                    octree_insert(chunk0, voxel);
-                }
-                // Grass top
-                Voxel_Object voxel = VoxelObjCreate(voxels[VOX_GRASS], make_color_rgba(80, 180, 60, 255), {x, groundY, z});
-                octree_insert(chunk0, voxel);
+            // Fill dirt below
+            for(int y = 0; y < groundLevel - 2; ++y) {
+                 Voxel_Object voxel = VoxelObjCreate(voxels[VOX_DIRT], make_color_rgba(60, 40, 30, 255), {x, y, z});
+                 octree_insert(chunk0, voxel);
+            }
+            // Top layers are snow
+            for(int y = groundLevel - 2; y <= groundLevel; ++y) {
+                 Voxel_Object voxel = VoxelObjCreate(voxels[VOX_SNOW], make_color_rgba(240, 248, 255, 255), {x, y, z});
+                 octree_insert(chunk0, voxel);
             }
         }
     }
 
-    // 2. Build the House
-    for (int x = houseMinX; x <= houseMaxX; ++x) {
-        for (int z = houseMinZ; z <= houseMaxZ; ++z) {
-            for (int y = houseFloorY; y <= houseCeilingY; ++y) {
+    // 2. THE HUGE GLASS MANSION
+    int houseCx = WORLD_SIZE_X / 2;
+    int houseCz = WORLD_SIZE_Z / 2;
+    int houseWidth = 70;  // Total width
+    int houseDepth = 60;  // Total depth
+    int houseStartY = groundLevel + 1;
+    
+    int hMinX = houseCx - houseWidth/2;
+    int hMaxX = houseCx + houseWidth/2;
+    int hMinZ = houseCz - houseDepth/2;
+    int hMaxZ = houseCz + houseDepth/2;
+
+    int floor1Height = 18;
+    int floor2Height = 16;
+    int roofHeight = 2;
+
+    // Construct the House
+    for (int x = hMinX; x <= hMaxX; ++x) {
+        for (int y = houseStartY; y <= houseStartY + floor1Height + floor2Height + roofHeight; ++y) {
+            for (int z = hMinZ; z <= hMaxZ; ++z) {
                 
-                bool isWall = (x == houseMinX || x == houseMaxX || z == houseMinZ || z == houseMaxZ);
-                bool isFloor = (y == houseFloorY);
-                bool isCeiling = (y == houseCeilingY);
+                // Determine relative height in house
+                int relY = y - houseStartY;
+                
+                // Check Borders
+                bool isWallX = (x == hMinX || x == hMaxX);
+                bool isWallZ = (z == hMinZ || z == hMaxZ);
+                bool isCorner = isWallX && isWallZ;
+                bool isPillar = (isWallX || isWallZ) && ((x % 15 == 0) || (z % 15 == 0)); // Structural pillars
+                
+                // Floors and Ceilings
+                bool isFloor1 = (relY == 0);
+                bool isCeiling1 = (relY == floor1Height);
+                bool isCeiling2 = (relY == floor1Height + floor2Height);
+                
+                // --- ARCHITECTURE LOGIC ---
 
-                // Floor (Wood)
-                if (isFloor) {
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(120, 70, 30, 255), {x, y, z});
+                // 1. Solid Quartz Foundation and Frame
+                if (isFloor1 || isCeiling1 || isCeiling2 || isCorner || (isPillar && !isCeiling2)) {
+                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_QUARTZ], make_color_rgba(235, 235, 235, 255), {x, y, z});
                     octree_insert(chunk0, voxel);
-                    continue;
                 }
-
-                // Walls (Stone with Windows)
-                if (isWall) {
-                    // Check for Door (Front Wall Z-Min)
-                    if (z == houseMinZ) {
-                        if (x >= doorMinX && x <= doorMaxX && y < houseFloorY + doorHeight) {
-                            continue; // Empty space for door
-                        }
-                    }
-
-                    // Simple Windows logic (on sides)
-                    // Windows at Y range [floor+8 to floor+14]
-                    bool isWindowHeight = (y >= houseFloorY + 8 && y <= houseFloorY + 14);
-                    // Windows every few voxels
-                    bool isWindowPos = ((x % 10 > 3 && x % 10 < 7) || (z % 10 > 3 && z % 10 < 7));
-                    
-                    if (isWindowHeight && isWindowPos && !isFloor && !isCeiling) {
-                        // Glass
-                         Voxel_Object voxel = VoxelObjCreate(voxels[VOX_GLASS], make_color_rgba(200, 220, 255, 80), {x, y, z});
-                         octree_insert(chunk0, voxel);
-                    } else {
-                        // Solid Wall
-                        Voxel_Object voxel = VoxelObjCreate(voxels[VOX_STONE], make_color_rgba(160, 160, 160, 255), {x, y, z});
+                // 2. Glass Curtain Walls (Huge windows reflecting forest)
+                else if (isWallX || isWallZ) {
+                    if (relY < floor1Height + floor2Height) {
+                         // Use low alpha for transparency simulation (if supported by shader logic)
+                         // Blue tint for glass
+                        Voxel_Object voxel = VoxelObjCreate(voxels[VOX_CLEAR_GLASS], make_color_rgba(200, 220, 255, 60), {x, y, z});
                         octree_insert(chunk0, voxel);
                     }
                 }
-            }
-        }
-    }
-
-    // 3. Build Roof (Pyramid Style)
-    int roofStartY = houseCeilingY + 1;
-    int roofHeight = 20;
-    for (int h = 0; h < roofHeight; ++h) {
-        int currentY = roofStartY + h;
-        int shrink = h; // Shrink by 1 voxel each level
-        
-        int rMinX = houseMinX - 1 + shrink;
-        int rMaxX = houseMaxX + 1 - shrink;
-        int rMinZ = houseMinZ - 1 + shrink;
-        int rMaxZ = houseMaxZ + 1 - shrink;
-
-        if (rMinX > rMaxX || rMinZ > rMaxZ) break;
-
-        for (int x = rMinX; x <= rMaxX; ++x) {
-            for (int z = rMinZ; z <= rMaxZ; ++z) {
-                // Hollow roof (only borders) or solid? Let's do solid for shadow casting
-                // Or just borders for "attic" space. Let's do borders.
-                bool isBorder = (x == rMinX || x == rMaxX || z == rMinZ || z == rMaxZ);
-                
-                if (isBorder || h > roofHeight - 3) { // Cap the top
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(100, 50, 20, 255), {x, currentY, z});
-                    octree_insert(chunk0, voxel);
+                // 3. Interior details (Stairs/Lights)
+                // Add a central lantern/chandelier
+                else if (x == houseCx && z == houseCz && (relY == floor1Height - 2 || relY == floor1Height + floor2Height - 2)) {
+                     Voxel_Object voxel = VoxelObjCreate(voxels[VOX_LANTERN], make_color_rgba(255, 200, 100, 255), {x, y, z});
+                     octree_insert(chunk0, voxel);
+                }
+                // Rooftop Railing
+                else if (relY == floor1Height + floor2Height + 1) {
+                    if (x > hMinX && x < hMaxX && z > hMinZ && z < hMaxZ) {
+                         // Empty walking space on roof
+                    } else if (isWallX || isWallZ) {
+                         // Railing
+                         Voxel_Object voxel = VoxelObjCreate(voxels[VOX_MIRROR], make_color_rgba(100, 100, 100, 255), {x, y, z});
+                         octree_insert(chunk0, voxel);
+                    }
                 }
             }
         }
     }
 
-    // 4. Place Trees
-    // Manually define some positions to avoid house/lake
-    struct TreePos { int x; int z; };
-    std::vector<TreePos> trees = {
-        {40, 40}, {60, 50}, {30, 100}, {50, 200}, 
-        {200, 50}, {220, 80}, {180, 30}, {20, 220},
-        {100, 220}, {140, 230}, {230, 230}
-    };
+    // 3. SAKURA TREES (Procedural & Non-Concentrated)
+    srand(12345); // Seed for consistent generation
+    int numTrees = 350; // Lots of trees, but spread over 256x256
+    
+    for(int i = 0; i < numTrees; ++i) {
+        int tx = rand() % (WORLD_SIZE_X - 10) + 5;
+        int tz = rand() % (WORLD_SIZE_Z - 10) + 5;
 
-    for (const auto& t : trees) {
-        int tx = t.x;
-        int tz = t.z;
-        int baseHeight = groundY + 1;
-        int trunkH = 12;
-
-        // Trunk
-        for (int y = baseHeight; y < baseHeight + trunkH; ++y) {
-             // Make trunk 2x2 for thickness
-             for(int ox=0; ox<2; ++ox) {
-                 for(int oz=0; oz<2; ++oz) {
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(90, 60, 30, 255), {tx+ox, y, tz+oz});
-                    octree_insert(chunk0, voxel);
-                 }
-             }
+        // Do not spawn inside the house or too close to it
+        if (tx >= hMinX - 5 && tx <= hMaxX + 5 && tz >= hMinZ - 5 && tz <= hMaxZ + 5) {
+            continue;
         }
 
-        // Leaves (Sphere)
-        int leavesCenterY = baseHeight + trunkH;
-        int leavesRadius = 6;
-        int centerLeavesX = tx; // offset slightly due to 2x2 trunk
-        int centerLeavesZ = tz;
+        int treeHeight = 8 + (rand() % 8); // Random height 8-16
+        int canopyRadius = 4 + (rand() % 3); // Big gorgeous canopy
 
-        for (int lx = -leavesRadius; lx <= leavesRadius; ++lx) {
-            for (int ly = -leavesRadius; ly <= leavesRadius; ++ly) {
-                for (int lz = -leavesRadius; lz <= leavesRadius; ++lz) {
-                    float dist = sqrtf((float)(lx*lx + ly*ly + lz*lz));
-                    if (dist <= leavesRadius) {
-                        // Chance to skip some voxels for texture/fluffiness
-                        if ((rand() % 100) > 10) { 
-                            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_LEAVES], make_color_rgba(30, 160, 30, 255), 
-                                {centerLeavesX + lx, leavesCenterY + ly, centerLeavesZ + lz});
+        // Trunk
+        for(int ty = groundLevel + 1; ty < groundLevel + treeHeight; ++ty) {
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_DARK_WOOD], make_color_rgba(60, 30, 10, 255), {tx, ty, tz});
+            octree_insert(chunk0, voxel);
+        }
+
+        // Canopy (Spherical-ish clouds of pink)
+        int canopyCenterY = groundLevel + treeHeight;
+        for (int cx = tx - canopyRadius; cx <= tx + canopyRadius; ++cx) {
+            for (int cy = canopyCenterY - canopyRadius; cy <= canopyCenterY + canopyRadius; ++cy) {
+                for (int cz = tz - canopyRadius; cz <= tz + canopyRadius; ++cz) {
+                    // Bounds check
+                    if (cx < 0 || cx >= WORLD_SIZE_X || cy < 0 || cy >= WORLD_SIZE_Y || cz < 0 || cz >= WORLD_SIZE_Z) continue;
+
+                    float dist = sqrt(pow(cx - tx, 2) + pow(cy - canopyCenterY, 2) + pow(cz - tz, 2));
+                    
+                    if (dist < canopyRadius) {
+                        // Randomize pink shades for "gorgeous" detail
+                        int r = 255;
+                        int g = 180 + (rand() % 40); // 180-220
+                        int b = 190 + (rand() % 40); // 190-230
+                        
+                        // Randomly miss some voxels to make leaves look airy, not solid blocks
+                        if ((rand() % 10) > 1) { 
+                            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_SAKURA_LEAVES], make_color_rgba(r, g, b, 255), {cx, cy, cz});
                             octree_insert(chunk0, voxel);
                         }
                     }
                 }
             }
         }
+
+        // Fallen Petals on the snow (detail)
+        for(int fx = tx - canopyRadius; fx <= tx + canopyRadius; ++fx) {
+            for(int fz = tz - canopyRadius; fz <= tz + canopyRadius; ++fz) {
+                if (rand() % 20 == 0 && fx >= 0 && fx < WORLD_SIZE_X && fz >= 0 && fz < WORLD_SIZE_Z) {
+                    // Place on top of snow
+                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_SAKURA_LEAVES], make_color_rgba(255, 192, 203, 255), {fx, groundLevel + 1, fz});
+                    octree_insert(chunk0, voxel);
+                }
+            }
+        }
     }
 
-    // --- CONSTRUCTION END ---
+
+    // --- END OF SCENE GENERATION ---
 
     size_t total_texels = _octree_texel_size(chunk0);
     size_t tex_dim = (size_t)ceil(cbrt((double)total_texels));
