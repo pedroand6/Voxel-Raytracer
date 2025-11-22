@@ -250,90 +250,186 @@ Octree *_get_neighbour(Octree *node, IVector3 dir) {
     return parent;
 }
 
-// NOTA: Esta função é muito ineficiente pois chama octree_find()
-// dentro do loop DDA. A lógica correta de DDA/travessia de octree
-// não requer 'find'.
-Octree *octree_traverse(Octree *tree, Ray ray) {
-    float tmin;
-    float tmax;
+// --- Math Helpers ---
 
-    Vector3 cell_count = vec3_float(CELL_COUNT, CELL_COUNT, CELL_COUNT);
+float fmax_fl(float a, float b) { return a > b ? a : b; }
+float fmin_fl(float a, float b) { return a < b ? a : b; }
 
-    if (!ray_hits_box(ray, vec3_ivec3(tree->left_bot_back), vec3_ivec3(tree->right_top_front), &tmin, &tmax))
-        return NULL;
+// --- Core Recursive Traversal ---
 
-    ray.origin = vec3_scalar_mul(ray.direction, fmin(tmin, tmax));
-    Vector3 cell = vec3_min(vec3_ivec3(ivec3_vec3(vec3_sub(ray.origin, vec3_ivec3(tree->left_bot_back)))), vec3_sub(cell_count, vec3_one()));
-    Vector3 cell_lbb = vec3_float(cell.x - 0.5, cell.y - 0.5, cell.z - 0.5);
-    Vector3 cell_rtf = vec3_float(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5);
-    Vector3 tMaxNeg = vec3_div(vec3_sub(cell_lbb, ray.origin), ray.direction);
-    Vector3 tMaxPos = vec3_div(vec3_sub(cell_rtf, ray.origin), ray.direction);
-
-    Vector3 t_max = vec3_float(
-        ray.direction.x < 0 ? tMaxNeg.x : tMaxPos.x,
-        ray.direction.y < 0 ? tMaxNeg.y : tMaxPos.y,
-        ray.direction.z < 0 ? tMaxNeg.z : tMaxPos.z
-    );
-
-    Vector3 step = vec3_sign(ray.direction);
-    Vector3 t_delta = vec3_abs(vec3_div(vec3_one(), ray.direction));
-
-    Vector3 neighbour_dirs[] = {
-        (step.x < 0) ? vec3_left() : vec3_right(),
-        (step.y < 0) ? vec3_down() : vec3_up(),
-        (step.z < 0) ? vec3_back() : vec3_forward(),
-    };
-
-    Octree *node = tree;
-
-    while (node) {
-        if(node->children)
-            for(int i = 0; i < CHILDREN_COUNT; i++) {
-                Octree *child = node->children[i];
-                if(child && child->has_voxel && !voxel_obj_compare(octree_find(child, ivec3_vec3(cell)), _invalid_voxel())) {
-                    node = child;
-                    i = -1;
-
-                    if(!node->children)
-                        return node;
-                }
-            }
-
-        int dir = 0;
-
-        if(t_max.x < t_max.y) {
-            if(t_max.x < t_max.z) {
-                t_max.x += t_delta.x;
-                cell.x += step.x;
-                dir = 0;
-            }
-            else {
-                t_max.z += t_delta.z;
-                cell.z += step.z;
-                dir = 2;
-            }
+/**
+ * tx0, ty0, tz0: t-values where ray ENTERS the current node on x,y,z axis
+ * tx1, ty1, tz1: t-values where ray EXITS the current node on x,y,z axis
+ * a: A bitmask (0-7) fixes negative ray directions (mirroring)
+ */
+Octree* proc_subtree(float tx0, float ty0, float tz0, 
+                     float tx1, float ty1, float tz1, 
+                     Octree *node, uint8_t a) {
+    
+    // 1. Base Case: If leaf, check for content
+    if (node->children == NULL) {
+        if (node->has_voxel) {
+            return node; // HIT!
         }
-        else {
-            if(t_max.y < t_max.z) {
-                t_max.y += t_delta.y;
-                cell.y += step.y;
-                dir = 1;
-            }
-            else {
-                t_max.z += t_delta.z;
-                cell.z += step.z;
-                dir = 2;
-            }
-        }
-
-        if(voxel_obj_compare(octree_find(node, ivec3_vec3(cell)), _invalid_voxel())) {
-            Vector3 neighbor_dir = neighbour_dirs[dir];
-            node = _get_neighbour(node, ivec3_vec3(neighbor_dir));
-        }
-        else if(!node->children)
-            return node;
+        return NULL; // MISS (Empty leaf)
     }
+
+    // If the entry t is further than exit t, the ray misses this node entirely
+    // (This check is often implicitly handled by the logic below, but good for safety)
+    if (fmax_fl(tx0, fmax_fl(ty0, tz0)) >= fmin_fl(tx1, fmin_fl(ty1, tz1))) {
+        return NULL;
+    }
+
+    // 2. Calculate Midpoint t-values (intersection with the node's internal cross-planes)
+    float txM = 0.5f * (tx0 + tx1);
+    float tyM = 0.5f * (ty0 + ty1);
+    float tzM = 0.5f * (tz0 + tz1);
+
+    // 3. Determine the first child to visit
+    // Since we mirrored the ray to be positive, we typically start at child 0 (min,min,min)
+    // unless the entry plane (t0) indicates we started "past" a midpoint.
+    // However, standard algorithm determines the first node based on max(t0) values.
+    
+    // Let's simplify: We find the "current node" index (0-7) relative to positive ray
+    int currNode = 0;
+    if (tx0 > ty0) {
+        if (tx0 > tz0) {
+            // Plane YZ is hit first? No, this logic finds which sub-cube we enter.
+            // If tx0 is large, it means we enter X late. 
+            // Standard Revelles logic uses explicit plane comparisons:
+             if (tyM < tx0) currNode |= 2;
+             if (tzM < tx0) currNode |= 4;
+             // We are effectively in the node that starts at tx0.
+        }
+    } 
+    
+    // --- SIMPLIFIED LOGIC ---
+    // We assume the ray enters at max(tx0, ty0, tz0). 
+    // We determine which side of the midplanes (txM, etc) that entry point lies.
+    // Note: This logic assumes the ray segment overlaps the node.
+    
+    // Does the entry point lie on the 'far' side of the X midpoint?
+    if(txM < tx0) currNode |= 1; 
+    if(tyM < ty0) currNode |= 2;
+    if(tzM < tz0) currNode |= 4;
+
+    // 4. Traverse children in order
+    while (currNode < 8) {
+        
+        Octree *child = node->children[currNode ^ a]; // XOR undoes the mirroring
+        Octree *hit = NULL;
+
+        // Determine the exit params for the *current child* // based on the axis we are traversing.
+        // e.g. if currNode's X bit is 0, it spans tx0..txM. If 1, it spans txM..tx1.
+        
+        switch (currNode) {
+            case 0: // 000
+                hit = proc_subtree(tx0, ty0, tz0, txM, tyM, tzM, child, a);
+                // Next: move to closest next plane (x, y, or z)
+                if (txM < tyM) {
+                    if (txM < tzM) { currNode |= 1; }      // Cross X plane
+                    else           { currNode |= 4; }      // Cross Z plane
+                } else {
+                    if (tyM < tzM) { currNode |= 2; }      // Cross Y plane
+                    else           { currNode |= 4; }      // Cross Z plane
+                }
+                break;
+                
+            case 1: // 001 (X+)
+                hit = proc_subtree(txM, ty0, tz0, tx1, tyM, tzM, child, a);
+                // We are at High X. We can only go Y+ or Z+ now.
+                if (tyM < tzM) currNode |= 2; // Cross Y
+                else           currNode |= 4; // Cross Z
+                break;
+
+            case 2: // 010 (Y+)
+                hit = proc_subtree(tx0, tyM, tz0, txM, ty1, tzM, child, a);
+                if (txM < tzM) currNode |= 1; // Cross X
+                else           currNode |= 4; // Cross Z
+                break;
+
+            case 3: // 011 (X+, Y+)
+                hit = proc_subtree(txM, tyM, tz0, tx1, ty1, tzM, child, a);
+                currNode |= 4; // Only way is Z+
+                break;
+
+            case 4: // 100 (Z+)
+                hit = proc_subtree(tx0, ty0, tzM, txM, tyM, tz1, child, a);
+                if (txM < tyM) currNode |= 1; 
+                else           currNode |= 2;
+                break;
+
+            case 5: // 101 (Z+, X+)
+                hit = proc_subtree(txM, ty0, tzM, tx1, tyM, tz1, child, a);
+                currNode |= 2; // Only way is Y+
+                break;
+
+            case 6: // 110 (Z+, Y+)
+                hit = proc_subtree(tx0, tyM, tzM, txM, ty1, tz1, child, a);
+                currNode |= 1; // Only way is X+
+                break;
+
+            case 7: // 111
+                hit = proc_subtree(txM, tyM, tzM, tx1, ty1, tz1, child, a);
+                currNode = 8; // Done, exit node
+                break;
+        }
+
+        if (hit) return hit; // Found something, bubble it up
+    }
+
     return NULL;
+}
+
+// --- Entry Point ---
+
+Octree* octree_ray_cast(Octree *root, Ray ray, Vector3 box_min, Vector3 box_max) {
+    // 1. Handle Negative Directions (Mirroring)
+    uint8_t a = 0;
+
+    // --- FIX X ---
+    if (ray.direction.x < 0) {
+        ray.origin.x = box_min.x + box_max.x - ray.origin.x; // Mirror Origin
+        ray.direction.x = -ray.direction.x;                  // Mirror Direction
+        a |= 1; 
+    }
+    
+    // --- FIX Y (CRITICAL UPDATE) ---
+    if (ray.direction.y < 0) {
+        ray.origin.y = box_min.y + box_max.y - ray.origin.y; // Mirror Origin
+        ray.direction.y = -ray.direction.y;                  // Mirror Direction
+        a |= 2;
+    }
+
+    // --- FIX Z (CRITICAL UPDATE) ---
+    if (ray.direction.z < 0) {
+        ray.origin.z = box_min.z + box_max.z - ray.origin.z; // Mirror Origin
+        ray.direction.z = -ray.direction.z;                  // Mirror Direction
+        a |= 4;
+    }
+
+    // 2. Calculate Initial T values
+    // (Now that direction is always positive, standard T calculation works safely)
+    float tx0 = (box_min.x - ray.origin.x) / ray.direction.x;
+    float tx1 = (box_max.x - ray.origin.x) / ray.direction.x;
+    
+    float ty0 = (box_min.y - ray.origin.y) / ray.direction.y;
+    float ty1 = (box_max.y - ray.origin.y) / ray.direction.y;
+    
+    float tz0 = (box_min.z - ray.origin.z) / ray.direction.z;
+    float tz1 = (box_max.z - ray.origin.z) / ray.direction.z;
+
+    // 3. Clamp to ensure we start at the box surface if ray starts outside
+    float t_entry = fmax_fl(fmax_fl(tx0, ty0), tz0);
+    float t_exit  = fmin_fl(fmin_fl(tx1, ty1), tz1);
+
+    // 4. Check if ray misses box completely
+    if (t_entry > t_exit || t_exit < 0) {
+        return NULL;
+    }
+
+    // 5. Launch Recursion
+    return proc_subtree(tx0, ty0, tz0, tx1, ty1, tz1, root, a);
 }
 
 size_t _octree_texel_size(Octree *tree) {

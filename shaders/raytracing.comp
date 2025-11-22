@@ -23,6 +23,8 @@ layout (binding = 2) uniform usampler3D u_octreeTexture;
 // A dimensão da sua textura (ex: 256.0 para uma textura 256x256x256)
 uniform int u_texDim;
 
+uniform float u_voxelScale; // A escala do voxel no mundo, ex: 2.0 significa 1 voxel a cada 0.5 unidades de espaço
+
 // Os cantos min/max do volume total da sua octree no espaço do mundo
 uniform ivec3 u_worldBoundsMin;
 uniform ivec3 u_worldBoundsMax;
@@ -30,6 +32,7 @@ ivec3 worldSize = u_worldBoundsMax - u_worldBoundsMin;
 
 uniform vec4 globalLight;
 uniform vec3 lightDir;
+
 
 /*
  * Estrutura de Retorno
@@ -40,6 +43,7 @@ struct VoxelData {
     lowp vec3 properties;  // Refração, Iluminação, K
     mediump ivec3 nodeMin;
     mediump ivec3 nodeMax;
+    mediump ivec3 nodeCoord;
 };
 
 /*
@@ -117,31 +121,35 @@ uvec4 getNodeData(ivec3 coord) {
     return texelFetch(u_octreeTexture, coord, 0);
 }
 
-VoxelData octreeFind(ivec3 worldPos) {
-    ivec3 currentNodeCoord = ivec3(0);
-    ivec3 nodeMin = u_worldBoundsMin;
-    ivec3 nodeMax = u_worldBoundsMax;
-
+VoxelData octreeFind(ivec3 worldPos, inout ivec3 minBound, inout ivec3 maxBound, inout ivec3 currentNodeCoord) {
     VoxelData data;
     data.color = vec4(0.0);
     data.properties = vec3(0.0);
-    data.nodeMin = nodeMin;
-    data.nodeMax = nodeMax;
 
     // Mantenha suas verificações de borda (u_worldBoundsMin/Max) aqui...
     if (any(lessThan(worldPos, u_worldBoundsMin)) || any(greaterThanEqual(worldPos, u_worldBoundsMax))) {
        return data;
     }
+
+    // Se a posição estiver dentro do mesmo node da intersecção anterior, continua da busca dele
+    // senão volta a busca da raiz da octree
+    bool isInside = all(greaterThanEqual(worldPos, minBound)) && 
+                    all(lessThan(worldPos, maxBound));
+    
+    int mask = int(isInside);       // 1 se dentro, 0 se fora
+    int invMask = 1 - mask;         // 0 se dentro, 1 se fora
+
+    data.nodeCoord = currentNodeCoord * mask; // (x * 1) ou (x * 0)
+    data.nodeMin = (minBound * mask) + (u_worldBoundsMin * invMask);
+    data.nodeMax = (maxBound * mask) + (u_worldBoundsMax * invMask);
     
     for (int i = 0; i < 16; i++) {
         // LEITURA DIRETA DE INTEIROS
-        uvec4 nodeData = getNodeData(currentNodeCoord); 
-        data.nodeMin = nodeMin;
-        data.nodeMax = nodeMax;
+        uvec4 nodeData = getNodeData(data.nodeCoord); 
 
         // Comparação direta de inteiros (>= 255u)
         if (nodeData.a >= LEAF_FLAG) {            
-            int linearIndex = toLinear(currentNodeCoord);
+            int linearIndex = toLinear(data.nodeCoord);
             
             // Lê coordenadas
             ivec3 coordTexelCoord = fromLinear(linearIndex + 1);
@@ -172,7 +180,7 @@ VoxelData octreeFind(ivec3 worldPos) {
         if (nodeData.a <= INTERNAL_NODE_FLAG) {
             // Pega ponteiro direto (sem conversão de cor)
             ivec3 pointerBlockBaseCoord = decodePointer(nodeData.rgb);
-            ivec3 midPoint = nodeMin + ((nodeMax - nodeMin) >> 1); // Divisão por 2 via shift é mais rápida
+            ivec3 midPoint = data.nodeMin + ((data.nodeMax - data.nodeMin) >> 1); // Divisão por 2 via shift é mais rápida
             int childIndices = getchildIndices(worldPos, midPoint);
             
             int linearBaseIndex = toLinear(pointerBlockBaseCoord);
@@ -182,13 +190,17 @@ VoxelData octreeFind(ivec3 worldPos) {
             ivec3 nextNode = decodePointer(childPointerData.rgb);
 
             if (all(equal(nextNode, ivec3(0)))) {
-                data.nodeMax = nodeMax;
                 data.color = vec4(0.0); // Mark as empty
                 return data;
             }
 
-            currentNodeCoord = nextNode;
-            getChildBounds(childIndices, nodeMin, nodeMax);
+            // Guarda as informações do nó pai
+            currentNodeCoord = data.nodeCoord;
+            minBound = data.nodeMin;
+            maxBound = data.nodeMax;
+
+            data.nodeCoord = nextNode;
+            getChildBounds(childIndices, data.nodeMin, data.nodeMax);
             continue;
         }
         return data;
@@ -214,14 +226,11 @@ vec4 accumulateColors(Ray rays[MAX_RAYS], int rayCount) {
     float totalWeight = 0.0;
     
     // OTIMIZADO: Loop unrolling manual para MAX_RAYS=8
-    if (rayCount > 0 && rays[0].defined) { result += rays[0].colorTint.rgb * rays[0].weight;}
-    if (rayCount > 1 && rays[1].defined) { result += rays[1].colorTint.rgb * rays[1].weight;}
-    if (rayCount > 2 && rays[2].defined) { result += rays[2].colorTint.rgb * rays[2].weight;}
-    if (rayCount > 3 && rays[3].defined) { result += rays[3].colorTint.rgb * rays[3].weight;}
-    if (rayCount > 4 && rays[4].defined) { result += rays[4].colorTint.rgb * rays[4].weight;}
-    if (rayCount > 5 && rays[5].defined) { result += rays[5].colorTint.rgb * rays[5].weight;}
-    if (rayCount > 6 && rays[6].defined) { result += rays[6].colorTint.rgb * rays[6].weight;}
-    if (rayCount > 7 && rays[7].defined) { result += rays[7].colorTint.rgb * rays[7].weight;}
+    for(int i = 0; i < rayCount; ++i){
+        if (rays[i].defined){
+            result += rays[i].colorTint.rgb * rays[i].weight;
+        }
+    }
 
     return vec4(result, 1.0);
 }
@@ -242,9 +251,14 @@ bool hitMarching(vec3 rayOrigin, vec3 rayDir, float rayIOF, out ivec3 hitMapPos,
     invDir.y = (abs(rayDir.y) < DIR_EPSILON) ? 1e20 : 1.0 / rayDir.y;
     invDir.z = (abs(rayDir.z) < DIR_EPSILON) ? 1e20 : 1.0 / rayDir.z;
 
+
+    // Começa a procurar o voxel da root
+    ivec3 currentNodeCoord = ivec3(0);
+    ivec3 nodeMin = u_worldBoundsMin;
+    ivec3 nodeMax = u_worldBoundsMax;
     // Pega o estado inicial
     ivec3 mapPos = ivec3(floor(rayPos));
-    hitVoxel = octreeFind(mapPos);
+    hitVoxel = octreeFind(mapPos, nodeMin, nodeMax, currentNodeCoord);
     
     // Inicializa prevVoxel na primeira iteração
     prevVoxel = hitVoxel;
@@ -283,7 +297,7 @@ bool hitMarching(vec3 rayOrigin, vec3 rayDir, float rayIOF, out ivec3 hitMapPos,
         // Salva o estado anterior antes de atualizar
         prevVoxel = hitVoxel;
         // Busca o NOVO voxel na nova posição
-        hitVoxel = octreeFind(mapPos);
+        hitVoxel = octreeFind(mapPos, nodeMin, nodeMax, currentNodeCoord);
         
         // 5. Verifica mudança de meio (lógica de Hit)
         float prevRefrac = (prevVoxel.color.a > 0.0 && prevVoxel.properties[0] > 0.0) ? prevVoxel.properties[0] : rayIOF;
@@ -315,8 +329,13 @@ bool inShadow(vec3 origin, vec3 lightDir) {
     ivec3 mapPos = ivec3(floor(rayPos));
     VoxelData vox;
 
-    for (int i = 0; i < 32; ++i) {
-        vox = octreeFind(mapPos);
+    // Começa a procurar o voxel da root
+    ivec3 currentNodeCoord = ivec3(0);
+    ivec3 nodeMin = u_worldBoundsMin;
+    ivec3 nodeMax = u_worldBoundsMax;
+
+    for (int i = 0; i < 64; ++i) {
+        vox = octreeFind(mapPos, nodeMin, nodeMax, currentNodeCoord);
         
         if (vox.color.a > 0.1) return true;
 
@@ -337,9 +356,35 @@ bool inShadow(vec3 origin, vec3 lightDir) {
     return false;
 }
 
+float getVoxelEdgeAO(vec3 hitPoint, vec3 normal) {
+    // Transforma o ponto de hit para espaço local do voxel (0.0 a 1.0)
+    // Assumindo que u_voxelScale já foi aplicado no hitPoint antes de chamar ou ajustando aqui
+    vec3 voxelLocal = fract(hitPoint * u_voxelScale);
+    
+    // Descobre em qual plano (UV) estamos baseados na normal
+    vec2 uv;
+    if (abs(normal.x) > 0.5) uv = voxelLocal.yz;
+    else if (abs(normal.y) > 0.5) uv = voxelLocal.xz;
+    else uv = voxelLocal.xy;
+
+    // Calcula a distância para a borda mais próxima (0.0 = borda, 0.5 = centro)
+    vec2 edgeDist = min(uv, 1.0 - uv);
+    float dist = min(edgeDist.x, edgeDist.y);
+
+    // Cria um gradiente suave: escuro na borda, claro no centro
+    // Ajuste 0.05 para bordas mais grossas ou finas
+    return smoothstep(0.0, 0.1, dist);
+}
+
 vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
-    ivec3 thisMapPos = ivec3(floor(rayOrigin));
-    VoxelData thisVoxel = octreeFind(thisMapPos);
+    ivec3 currentNodeCoord = ivec3(0);
+    ivec3 nodeMin = u_worldBoundsMin;
+    ivec3 nodeMax = u_worldBoundsMax;
+
+    vec3 gridRayOrigin = rayOrigin * u_voxelScale;
+
+    ivec3 thisMapPos = ivec3(floor(gridRayOrigin));
+    VoxelData thisVoxel = octreeFind(thisMapPos, nodeMin, nodeMax, currentNodeCoord);
 
     float startIOF = (thisVoxel.properties[0] > 0.0 && thisVoxel.properties[0] < 3.0) 
                       ? thisVoxel.properties[0] : 1.0;
@@ -356,7 +401,7 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
     float invLen = inversesqrt(dot(rayDir, rayDir));
     rayDir = rayDir * invLen;
     rayStack[0] = Ray(
-        rayOrigin, rayDir, startIOF, 1.0, true, globalLight, 0.0,
+        gridRayOrigin, rayDir, startIOF, 1.0, true, globalLight, 0.0,
         thisVoxel.color.a > 0.0 ? thisVoxel.color : vec4(1.0),
         thisVoxel.color.a * 5.0
     );
@@ -394,17 +439,19 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
             continue;
         }
 
+        vec3 normal = length(hitNormal) > 0.0 ? hitNormal : vec3(0.0, 1.0, 0.0);
+
+        vec3 hitPointWorld = hitPoint / u_voxelScale;
+        // Adiciona metade do tamanho na direção da normal para chegar ao centro da FACE
+        vec3 faceCenterGrid = vec3(mapPos) + normal;
+
         // Update distance traveled through current medium
-        currentRay.distanceInMedium += length(hitPoint - currentRay.origin);
+        currentRay.distanceInMedium += length(faceCenterGrid - currentRay.origin) / u_voxelScale;
         
         if (hitVoxel.color.a <= 0.0) hitVoxel.properties = vec3(1.0, 0.0, 0.0);
         if (lastVoxel.color.a <= 0.0) lastVoxel.properties = currentRay.IOF > 0.0 ? vec3(0.0) : vec3(1.0, 0.0, 0.0);
 
-        vec3 normal = length(hitNormal) > 0.0 ? hitNormal : vec3(0.0, 1.0, 0.0);
-        vec3 finalLight = vec3(0.2);
-        if (!inShadow(hitPoint + normal * 1e-3, lightDir)) {
-            finalLight += vec3(max(dot(normal, lightDir), 0.0));
-        }
+        vec3 finalLight = vec3(max(dot(normal, lightDir), 0.0));
         
         // Determine surface color based on which side we're hitting
         vec4 surfaceColor = hitVoxel.color.a > 0.0 ? hitVoxel.color : lastVoxel.color;
@@ -473,33 +520,71 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
             }
         }
         else {
-            // === OPAQUE SURFACE ===
-            float specularFactor = hitVoxel.properties[2];
-            float diffuseFactor = 1.0 - specularFactor;
+            // === SUPERFÍCIE OPACA ESTILIZADA ===
+            
+            // 1. Calcula o "Fake AO" das bordas do cubo
+            float edgeAO = getVoxelEdgeAO(hitPointWorld, normal); // Use coordenada de mundo real aqui
+            edgeAO = mix(0.6, 1.0, edgeAO); // Nunca escurece totalmente (mínimo 0.6)
 
-            vec4 litSurfaceColor = vec4(surfaceColor.rgb * finalLight, 1.0);
-
-            // Diffuse component
-            if (diffuseFactor > 0.01 && resultSize < MAX_RAYS) {
-                Ray finalRay;
-                finalRay.defined = true;
-                finalRay.weight = currentRay.weight * diffuseFactor;
-                finalRay.colorTint = transmittedColor * litSurfaceColor;
-                
-                addRay(resultRays, finalRay, resultSize);
+            // 2. Iluminação Direta (Sol)
+            float ndotl = max(dot(normal, lightDir), 0.0);
+            ndotl = floor(ndotl * 4.0) / 4.0;
+            
+            // Sombras: Verifica se está na sombra
+            bool isInShadow = false;
+            if (ndotl > 0.0) {
+                isInShadow = inShadow(faceCenterGrid + normal * 1e-3, lightDir);
             }
+            
+            float shadowFactor = isInShadow ? 0.0 : 1.0;
 
-            // Specular reflection
+            // 3. Iluminação Ambiente (Hemisférica)
+            // Luz vem de cima (Céu azulado) e reflete de baixo (Chão esverdeado/marrom)
+            float upFactor = normal.y * 0.5 + 0.5; // Mapeia -1..1 para 0..1
+            vec3 ambientLight = mix(vec3(0.1, 0.15, 0.2), vec3(0.6, 0.7, 0.9), upFactor); 
+            
+            // 4. Composição da Luz Final
+            // A luz direta é somada à ambiente. A sombra afeta APENAS a direta.
+            vec3 directLight = globalLight.rgb * ndotl * shadowFactor;
+            
+            vec3 finalIrradiance = (directLight + ambientLight) * edgeAO;
+
+            vec4 litSurfaceColor = vec4(surfaceColor.rgb * finalIrradiance, 1.0);
+
+            // --- Specular (Mantém o seu, mas estilizado) ---
+            // Voxels geralmente ficam bonitos com especular pequeno e forte
+            float specularFactor = hitVoxel.properties[2];
             if (specularFactor > 0.01) {
-                vec3 reflectDir = reflect(incidentDir, normal);
-                float reflectWeight = currentRay.weight * specularFactor;
-                if (reflectWeight > 1e-4) {
+                 vec3 reflectDir = reflect(incidentDir, normal);
+                 float spec = pow(max(dot(reflectDir, incidentDir), 0.0), 32.0); // Shininess alto
+                 
+                 // Adiciona o brilho especular na cor (se não estiver na sombra)
+                 if (!isInShadow) {
+                    litSurfaceColor.rgb += vec3(spec * specularFactor);
+                 }
+
+                 // Se for muito reflexivo (espelho/metal), lança o raio
+                 float reflectWeight = currentRay.weight * specularFactor;
+                 if (reflectWeight > 1e-4 && stackSize < MAX_RAYS) {
                     rayStack[stackSize++] = Ray(
                         hitPoint + normal * 1e-4, reflectDir, n1,
                         reflectWeight, true,
                         transmittedColor, 0.0, vec4(1.0), 0.0
                     );
-                }
+                 }
+            }
+            
+            // Diffuse (O que sobrou do specular é difuso)
+            float diffuseWeight = (1.0 - specularFactor);
+            if (diffuseWeight > 0.01 && resultSize < MAX_RAYS) {
+                 Ray finalRay;
+                 finalRay.defined = true;
+                 finalRay.weight = currentRay.weight * diffuseWeight;
+                 
+                 // A mágica acontece aqui: Multiplicamos a cor do voxel pela luz calculada
+                 finalRay.colorTint = transmittedColor * litSurfaceColor;
+                 
+                 addRay(resultRays, finalRay, resultSize);
             }
         }
     }

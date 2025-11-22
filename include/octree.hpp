@@ -23,7 +23,7 @@ Octree *octree_new(void);
 Octree *octree_create(Octree *parent, IVector3 left_bot_back, IVector3 right_top_front);
 void octree_insert(Octree *tree, Voxel_Object voxel);
 Voxel_Object octree_find(Octree *tree, IVector3 coord);
-Octree *octree_traverse(Octree *tree, Ray ray);
+Octree *octree_ray_cast(Octree *root, Ray ray, Vector3 box_min, Vector3 box_max);
 uint8_t *octree_texture(Octree *tree, size_t *arr_size, size_t tex_dim);
 size_t _octree_texel_size(Octree *tree);
 void octree_remove(Octree *tree, IVector3 coord);
