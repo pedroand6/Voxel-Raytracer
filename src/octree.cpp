@@ -3,6 +3,7 @@ extern "C" {
     #include <vmm/vec3.h>
     #include <vmm/ray.h>
 }
+#include <iostream>
 #include <octree.hpp>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -180,42 +181,145 @@ int _create_children(Octree *tree, IVector3 mid_points_ignoradas) {
     return 0;
 }
 
-void octree_insert(Octree *tree, Voxel_Object voxel) {
-    if (!tree) return;
-    
-    Octree *curr = tree;
-    while(true) {
-        if (_coord_is_outside(voxel.coord, curr->left_bot_back, curr->right_top_front)) return;
+// Verifica se um nó é uma folha (tem voxel e não tem filhos)
+bool _is_leaf(Octree *node) {
+    return node && node->has_voxel && !node->children;
+}
 
-        if (curr->children) {
-            IVector3 mid;
-            mid.x = curr->left_bot_back.x + (curr->right_top_front.x - curr->left_bot_back.x) / 2;
-            mid.y = curr->left_bot_back.y + (curr->right_top_front.y - curr->left_bot_back.y) / 2;
-            mid.z = curr->left_bot_back.z + (curr->right_top_front.z - curr->left_bot_back.z) / 2;
+// Verifica se dois nós são visivelmente idênticos
+bool _nodes_are_identical(Octree *a, Octree *b) {
+    if (!_is_leaf(a) || !_is_leaf(b)) return false;
+    
+    // Compara cor e propriedades (ignorando coordenada, pois ela muda)
+    // Nota: Aqui assumimos que se a cor é igual, o bloco é igual.
+    // Se você tiver IDs de bloco, compare os IDs.
+    return ((a->voxel.color == b->voxel.color) &&
+           (a->voxel.voxel.refraction == b->voxel.voxel.refraction) &&
+           (a->voxel.voxel.illumination == b->voxel.voxel.illumination)) 
+           || (a->voxel.coord.y <= MIN_HEIGHT && b->voxel.coord.y <= MIN_HEIGHT);
+}
+
+// Divide um nó sólido em 8 filhos sólidos idênticos
+int _split_node(Octree *tree) {
+    if (tree->children) return 0; 
+
+    // Backup dos dados
+    Voxel_Object originalData = tree->voxel;
+    bool wasSolid = tree->has_voxel;
+
+    IVector3 min = tree->left_bot_back;
+    IVector3 max = tree->right_top_front;
+    
+    IVector3 mid;
+    mid.x = min.x + (max.x - min.x) / 2;
+    mid.y = min.y + (max.y - min.y) / 2;
+    mid.z = min.z + (max.z - min.z) / 2;
+
+    // Cria os filhos (inicialmente vazios)
+    if (_create_children(tree, mid) != 0) return -1;
+
+    if (wasSolid) {
+        // --- HEURÍSTICA DE DIFERENCIAÇÃO ---
+        
+        // Verifica se a coordenada do voxel coincide com a base do nó.
+        // Em um nó Merged (sólido total), normalizamos a coord para a base.
+        // Em um nó Lazy (ponto flutuante), a coord é a posição original do bloco.
+        bool isVolume = ivec3_equal_vec(originalData.coord, tree->left_bot_back);
+
+        if (isVolume) {
+            // CASO A: O nó era um VOLUME SÓLIDO (ex: parede mergeada).
+            // Preenchemos todos os 8 filhos com o material.
+            for (int i = 0; i < 8; i++) {
+                tree->children[i]->voxel = originalData;
+                tree->children[i]->has_voxel = true;
+                
+                // Cada filho assume sua própria posição no espaço
+                tree->children[i]->voxel.coord = tree->children[i]->left_bot_back;
+            }
+        } else {
+            // CASO B: O nó era um PONTO ISOLADO (Lazy Insert).
+            // Apenas movemos o voxel para o sub-nó correto, os outros 7 ficam vazios (Ar).
             
-            int pos = _get_pos_in_octree(voxel.coord, mid);
-            curr = curr->children[pos];
-            continue;
+            int pos = _get_pos_in_octree(originalData.coord, mid);
+            
+            tree->children[pos]->voxel = originalData;
+            tree->children[pos]->has_voxel = true;
+            // Mantemos a coordenada original exata!
         }
         
-        if (!curr->has_voxel) {
-            curr->voxel = voxel;
-            curr->has_voxel = true;
-            return;
-        }
-
-        if (ivec3_equal_vec(curr->voxel.coord, voxel.coord)) {
-            curr->voxel = voxel;
-            return;
-        }
-
-        IVector3 mid;
-        mid.x = curr->left_bot_back.x + (curr->right_top_front.x - curr->left_bot_back.x) / 2;
-        mid.y = curr->left_bot_back.y + (curr->right_top_front.y - curr->left_bot_back.y) / 2;
-        mid.z = curr->left_bot_back.z + (curr->right_top_front.z - curr->left_bot_back.z) / 2;
-
-        _create_children(curr, mid); 
+        // O pai deixa de ser folha
+        tree->has_voxel = false;
     }
+    
+    return 0;
+}
+
+// Tenta simplificar a árvore fundindo 8 filhos idênticos
+void _try_merge_children(Octree *node) {
+    if (!node || !node->children) return;
+
+    // 1. Verifica se todos os 8 filhos são folhas
+    for (int i = 0; i < 8; i++) {
+        if (!_is_leaf(node->children[i])) return; // Não podemos fundir se um filho tiver netos
+    }
+
+    // 2. Verifica se todos são idênticos ao primeiro filho
+    Octree *first = node->children[0];
+    for (int i = 1; i < 8; i++) {
+        if (!_nodes_are_identical(first, node->children[i])) return;
+    }
+
+    // 3. MERGE! Todos são iguais.
+    // Copia os dados do primeiro filho para o pai
+    node->voxel = first->voxel;
+    // Ajusta a coordenada do pai para ser a base do nó (opcional, mas bom para consistência)
+    node->voxel.coord = node->left_bot_back; 
+    node->has_voxel = true;
+
+    // 4. Apaga os filhos
+    for (int i = 0; i < 8; i++) {
+        free(node->children[i]);
+    }
+    free(node->children);
+    node->children = NULL;
+}
+
+void octree_insert(Octree *tree, Voxel_Object voxel) {
+    if (!tree) return;
+    if (_coord_is_outside(voxel.coord, tree->left_bot_back, tree->right_top_front)) return;
+
+    IVector3 size = ivec3_sub(tree->right_top_front, tree->left_bot_back);
+
+    // --- CASO BASE: Tamanho 1x1x1 ---
+    // Aqui nós substituímos o dado, seja ele qual for.
+    if (size.x <= 1 && size.y <= 1 && size.z <= 1) {
+        tree->voxel = voxel;
+        tree->has_voxel = true;
+        return;
+    }
+
+    // --- SPLIT DOWN (A CORREÇÃO) ---
+    // Se este nó não tem filhos, mas precisamos descer mais (porque size > 1),
+    // precisamos criar os filhos.
+    if (!tree->children) {
+        // Se já existe algo aqui (Blocão Sólido), o _split_node vai
+        // copiar esse material para os filhos antes de continuarmos.
+        if (_split_node(tree) != 0) return; 
+    }
+
+    // --- DESCIDA RECURSIVA ---
+    IVector3 mid;
+    mid.x = tree->left_bot_back.x + size.x / 2;
+    mid.y = tree->left_bot_back.y + size.y / 2;
+    mid.z = tree->left_bot_back.z + size.z / 2;
+    
+    int pos = _get_pos_in_octree(voxel.coord, mid);
+    octree_insert(tree->children[pos], voxel);
+
+    // --- MERGE UP (OTIMIZAÇÃO) ---
+    // Na volta, tentamos juntar de novo, caso tenhamos preenchido um buraco
+    // com o mesmo material que já existia ao redor.
+    _try_merge_children(tree);
 }
 
 // NOTA: Esta função e octree_traverse são complexas, 
@@ -251,192 +355,135 @@ Octree *_get_neighbour(Octree *node, IVector3 dir) {
 }
 
 // --- Math Helpers ---
-
 float fmax_fl(float a, float b) { return a > b ? a : b; }
 float fmin_fl(float a, float b) { return a < b ? a : b; }
 
 // --- Core Recursive Traversal ---
+// Busca um nó folha contendo a coordenada global 'pos'
+// Atualiza nodeMin e nodeMax com os limites desse nó
+Octree* _octree_find_leaf(Octree *root, IVector3 pos, IVector3 *nodeMin, IVector3 *nodeMax) {
+    Octree *curr = root;
+    IVector3 min = root->left_bot_back;
+    IVector3 max = root->right_top_front;
 
-/**
- * tx0, ty0, tz0: t-values where ray ENTERS the current node on x,y,z axis
- * tx1, ty1, tz1: t-values where ray EXITS the current node on x,y,z axis
- * a: A bitmask (0-7) fixes negative ray directions (mirroring)
- */
-Octree* proc_subtree(float tx0, float ty0, float tz0, 
-                     float tx1, float ty1, float tz1, 
-                     Octree *node, uint8_t a) {
-    
-    // 1. Base Case: If leaf, check for content
-    if (node->children == NULL) {
-        if (node->has_voxel) {
-            return node; // HIT!
+    // Se estiver fora do mundo, retorna NULL
+    if (_coord_is_outside(pos, min, max)) return NULL;
+
+    while (curr->children != NULL) {
+        // Calcula ponto médio
+        IVector3 mid;
+        mid.x = min.x + (max.x - min.x) / 2;
+        mid.y = min.y + (max.y - min.y) / 2;
+        mid.z = min.z + (max.z - min.z) / 2;
+
+        // Descobre índice do filho
+        int childIdx = _get_pos_in_octree(pos, mid);
+        
+        // Atualiza os limites para o próximo nível (desce a caixa)
+        if (childIdx & 4) min.x = mid.x; else max.x = mid.x;
+        if (childIdx & 2) min.y = mid.y; else max.y = mid.y;
+        if (childIdx & 1) min.z = mid.z; else max.z = mid.z;
+
+        curr = curr->children[childIdx];
+        
+        // Se o filho for nulo (buraco na árvore), paramos aqui.
+        // Retornamos este nó "vazio" (ou NULL se preferir tratar como ar)
+        // Mas precisamos retornar os bounds corretos desse vazio!
+        if (curr == NULL) {
+            *nodeMin = min;
+            *nodeMax = max;
+            return NULL; 
         }
-        return NULL; // MISS (Empty leaf)
     }
 
-    // If the entry t is further than exit t, the ray misses this node entirely
-    // (This check is often implicitly handled by the logic below, but good for safety)
-    if (fmax_fl(tx0, fmax_fl(ty0, tz0)) >= fmin_fl(tx1, fmin_fl(ty1, tz1))) {
-        return NULL;
-    }
+    // Chegamos numa folha
+    *nodeMin = min;
+    *nodeMax = max;
+    return curr;
+}
 
-    // 2. Calculate Midpoint t-values (intersection with the node's internal cross-planes)
-    float txM = 0.5f * (tx0 + tx1);
-    float tyM = 0.5f * (ty0 + ty1);
-    float tzM = 0.5f * (tz0 + tz1);
+Octree* octree_ray_cast(Octree *root, Ray ray, Vector3 worldMin, Vector3 worldMax) {
+    // 1. Setup inicial
+    Vector3 rayPos = ray.origin;
+    Vector3 rayDir = ray.direction;
 
-    // 3. Determine the first child to visit
-    // Since we mirrored the ray to be positive, we typically start at child 0 (min,min,min)
-    // unless the entry plane (t0) indicates we started "past" a midpoint.
-    // However, standard algorithm determines the first node based on max(t0) values.
-    
-    // Let's simplify: We find the "current node" index (0-7) relative to positive ray
-    int currNode = 0;
-    if (tx0 > ty0) {
-        if (tx0 > tz0) {
-            // Plane YZ is hit first? No, this logic finds which sub-cube we enter.
-            // If tx0 is large, it means we enter X late. 
-            // Standard Revelles logic uses explicit plane comparisons:
-             if (tyM < tx0) currNode |= 2;
-             if (tzM < tx0) currNode |= 4;
-             // We are effectively in the node that starts at tx0.
-        }
-    } 
-    
-    // --- SIMPLIFIED LOGIC ---
-    // We assume the ray enters at max(tx0, ty0, tz0). 
-    // We determine which side of the midplanes (txM, etc) that entry point lies.
-    // Note: This logic assumes the ray segment overlaps the node.
-    
-    // Does the entry point lie on the 'far' side of the X midpoint?
-    if(txM < tx0) currNode |= 1; 
-    if(tyM < ty0) currNode |= 2;
-    if(tzM < tz0) currNode |= 4;
+    // Evita divisão por zero (igual ao GLSL)
+    Vector3 invDir;
+    invDir.x = (fabsf(rayDir.x) < 1e-8f) ? 1e20f : 1.0f / rayDir.x;
+    invDir.y = (fabsf(rayDir.y) < 1e-8f) ? 1e20f : 1.0f / rayDir.y;
+    invDir.z = (fabsf(rayDir.z) < 1e-8f) ? 1e20f : 1.0f / rayDir.z;
 
-    // 4. Traverse children in order
-    while (currNode < 8) {
-        
-        Octree *child = node->children[currNode ^ a]; // XOR undoes the mirroring
-        Octree *hit = NULL;
+    // Coordenada inteira atual do mapa
+    IVector3 mapPos;
+    mapPos.x = (int)floorf(rayPos.x);
+    mapPos.y = (int)floorf(rayPos.y);
+    mapPos.z = (int)floorf(rayPos.z);
 
-        // Determine the exit params for the *current child* // based on the axis we are traversing.
-        // e.g. if currNode's X bit is 0, it spans tx0..txM. If 1, it spans txM..tx1.
-        
-        switch (currNode) {
-            case 0: // 000
-                hit = proc_subtree(tx0, ty0, tz0, txM, tyM, tzM, child, a);
-                // Next: move to closest next plane (x, y, or z)
-                if (txM < tyM) {
-                    if (txM < tzM) { currNode |= 1; }      // Cross X plane
-                    else           { currNode |= 4; }      // Cross Z plane
-                } else {
-                    if (tyM < tzM) { currNode |= 2; }      // Cross Y plane
-                    else           { currNode |= 4; }      // Cross Z plane
-                }
-                break;
-                
-            case 1: // 001 (X+)
-                hit = proc_subtree(txM, ty0, tz0, tx1, tyM, tzM, child, a);
-                // We are at High X. We can only go Y+ or Z+ now.
-                if (tyM < tzM) currNode |= 2; // Cross Y
-                else           currNode |= 4; // Cross Z
-                break;
+    // Estado atual do Voxel
+    IVector3 nodeMin = {0,0,0}, nodeMax = {0,0,0};
+    Octree *currNode = NULL;
 
-            case 2: // 010 (Y+)
-                hit = proc_subtree(tx0, tyM, tz0, txM, ty1, tzM, child, a);
-                if (txM < tzM) currNode |= 1; // Cross X
-                else           currNode |= 4; // Cross Z
-                break;
+    // Limite de passos (segurança)
+    int maxSteps = 512; 
 
-            case 3: // 011 (X+, Y+)
-                hit = proc_subtree(txM, tyM, tz0, tx1, ty1, tzM, child, a);
-                currNode |= 4; // Only way is Z+
-                break;
+    for (int i = 0; i < maxSteps; i++) {
+        // Busca o nó atual na árvore e seus limites
+        // (Sempre reinicia da raiz para garantir precisão, igual ao shader "safe")
+        currNode = _octree_find_leaf(root, mapPos, &nodeMin, &nodeMax);
 
-            case 4: // 100 (Z+)
-                hit = proc_subtree(tx0, ty0, tzM, txM, tyM, tz1, child, a);
-                if (txM < tyM) currNode |= 1; 
-                else           currNode |= 2;
-                break;
-
-            case 5: // 101 (Z+, X+)
-                hit = proc_subtree(txM, ty0, tzM, tx1, tyM, tz1, child, a);
-                currNode |= 2; // Only way is Y+
-                break;
-
-            case 6: // 110 (Z+, Y+)
-                hit = proc_subtree(tx0, tyM, tzM, txM, ty1, tz1, child, a);
-                currNode |= 1; // Only way is X+
-                break;
-
-            case 7: // 111
-                hit = proc_subtree(txM, tyM, tzM, tx1, ty1, tz1, child, a);
-                currNode = 8; // Done, exit node
-                break;
+        // Se encontrou um nó válido COM voxel e Y válido, é um HIT!
+        if (currNode && currNode->has_voxel && currNode->voxel.coord.y > MIN_HEIGHT) {
+            return currNode;
         }
 
-        if (hit) return hit; // Found something, bubble it up
+        // Se não achou nada (ar), precisamos avançar o raio para sair deste nó vazio.
+        // Usamos os bounds retornados por _octree_find_leaf (que ajustou min/max para o tamanho do vazio)
+        
+        // Cálculo de intersecção AABB (para sair do nó)
+        float tMaxX = (rayDir.x > 0.0f ? (float)nodeMax.x - rayPos.x : (float)nodeMin.x - rayPos.x) * invDir.x;
+        float tMaxY = (rayDir.y > 0.0f ? (float)nodeMax.y - rayPos.y : (float)nodeMin.y - rayPos.y) * invDir.y;
+        float tMaxZ = (rayDir.z > 0.0f ? (float)nodeMax.z - rayPos.z : (float)nodeMin.z - rayPos.z) * invDir.z;
+
+        // Descobre o menor passo positivo (qual parede atingimos)
+        // Adicionamos epsilon para garantir cruzamento
+        float tStep = fmin_fl(tMaxX, fmin_fl(tMaxY, tMaxZ)) + 0.0001f;
+        
+        // Proteção contra passos muito pequenos (travamento numérico)
+        if (tStep < 0.0001f) tStep = 0.0001f;
+
+        // Avança o raio
+        rayPos.x += rayDir.x * tStep;
+        rayPos.y += rayDir.y * tStep;
+        rayPos.z += rayDir.z * tStep;
+
+        // Empurra levemente para dentro do vizinho (igual ao shader)
+        Vector3 testPos;
+        testPos.x = rayPos.x + rayDir.x * 0.001f;
+        testPos.y = rayPos.y + rayDir.y * 0.001f;
+        testPos.z = rayPos.z + rayDir.z * 0.001f;
+
+        mapPos.x = (int)floorf(testPos.x);
+        mapPos.y = (int)floorf(testPos.y);
+        mapPos.z = (int)floorf(testPos.z);
+
+        // Verifica se saiu do mundo
+        if (_coord_is_outside(mapPos, root->left_bot_back, root->right_top_front)) {
+            return NULL;
+        }
     }
 
     return NULL;
 }
 
-// --- Entry Point ---
-
-Octree* octree_ray_cast(Octree *root, Ray ray, Vector3 box_min, Vector3 box_max) {
-    // 1. Handle Negative Directions (Mirroring)
-    uint8_t a = 0;
-
-    // --- FIX X ---
-    if (ray.direction.x < 0) {
-        ray.origin.x = box_min.x + box_max.x - ray.origin.x; // Mirror Origin
-        ray.direction.x = -ray.direction.x;                  // Mirror Direction
-        a |= 1; 
-    }
-    
-    // --- FIX Y (CRITICAL UPDATE) ---
-    if (ray.direction.y < 0) {
-        ray.origin.y = box_min.y + box_max.y - ray.origin.y; // Mirror Origin
-        ray.direction.y = -ray.direction.y;                  // Mirror Direction
-        a |= 2;
-    }
-
-    // --- FIX Z (CRITICAL UPDATE) ---
-    if (ray.direction.z < 0) {
-        ray.origin.z = box_min.z + box_max.z - ray.origin.z; // Mirror Origin
-        ray.direction.z = -ray.direction.z;                  // Mirror Direction
-        a |= 4;
-    }
-
-    // 2. Calculate Initial T values
-    // (Now that direction is always positive, standard T calculation works safely)
-    float tx0 = (box_min.x - ray.origin.x) / ray.direction.x;
-    float tx1 = (box_max.x - ray.origin.x) / ray.direction.x;
-    
-    float ty0 = (box_min.y - ray.origin.y) / ray.direction.y;
-    float ty1 = (box_max.y - ray.origin.y) / ray.direction.y;
-    
-    float tz0 = (box_min.z - ray.origin.z) / ray.direction.z;
-    float tz1 = (box_max.z - ray.origin.z) / ray.direction.z;
-
-    // 3. Clamp to ensure we start at the box surface if ray starts outside
-    float t_entry = fmax_fl(fmax_fl(tx0, ty0), tz0);
-    float t_exit  = fmin_fl(fmin_fl(tx1, ty1), tz1);
-
-    // 4. Check if ray misses box completely
-    if (t_entry > t_exit || t_exit < 0) {
-        return NULL;
-    }
-
-    // 5. Launch Recursion
-    return proc_subtree(tx0, ty0, tz0, tx1, ty1, tz1, root, a);
-}
-
 size_t _octree_texel_size(Octree *tree) {
     if(!tree) return 0;
-    if(!tree->children) return LEAF_SIZE; // <-- Agora retorna 3
     
-    size_t total = 1 + 8; // 1 (pai) + 8 (bloco de ponteiros)
+    // CRITICAL FIX: Empty leaf nodes don't take space in texture
+    if(!tree->children) {
+        return tree->has_voxel ? LEAF_SIZE : 0;
+    }
+    
+    size_t total = 1 + 8; // Parent node + pointer block
     
     for(int i = 0; i < CHILDREN_COUNT; i++) {
         total += _octree_texel_size(tree->children[i]);
@@ -466,36 +513,31 @@ void _transform_node_to_texture(Octree *node,
                                 size_t *next_free_block, 
                                 size_t tex_dim) 
 {
-    size_t base = *next_free_block * 4; // (4 bytes por texel)
+    size_t base = *next_free_block * 4;
     
     if (node->children == NULL) {
-        // ---- Início da Lógica da Folha (LEAF_SIZE = 3) ----
+        // CRITICAL FIX: Only write leaf data if voxel exists
+        if (!node->has_voxel) {
+            return; // Empty node, don't write anything
+        }
         
-        // TEXEL 0: Cor (RGB) e Flag de Folha (A)
+        // TEXEL 0: Color + Leaf Flag
         texture[base + 0] = get_red_rgba(node->voxel.color);
         texture[base + 1] = get_green_rgba(node->voxel.color);
         texture[base + 2] = get_blue_rgba(node->voxel.color);
-        texture[base + 3] = 255; //Flag for leaf node
+        texture[base + 3] = 255;
         
-        // TEXEL 1: Coordenada do Voxel (XYZ) e Alpha da Cor (A)
-        // (Isso assume que as coordenadas do mundo estão entre 0-255)
-        texture[base + 4] = (uint8_t)(node->voxel.coord.x);
-        texture[base + 5] = (uint8_t)(node->voxel.coord.y);
-        texture[base + 6] = (uint8_t)(node->voxel.coord.z);
-        texture[base + 7] = get_alpha_rgba(node->voxel.color); // color alpha
-        
-        // TEXEL 2: Propriedades (RGB) e (A não usado)
-        texture[base + 8] = (uint8_t)(node->voxel.voxel.refraction * (255.0 / 3.0));
-        texture[base + 9] = (uint8_t)(node->voxel.voxel.illumination * 255.0);
-        texture[base + 10] = (uint8_t)(node->voxel.voxel.k * 255.0);
-        texture[base + 11] = 255 * node->has_voxel; // Mostra se é um voxel ou leaf vazio
+        // TEXEL 1: Properties + Alpha
+        texture[base + 4] = (uint8_t)(node->voxel.voxel.refraction * (255.0 / 3.0));
+        texture[base + 5] = (uint8_t)(node->voxel.voxel.illumination * 255.0);
+        texture[base + 6] = (uint8_t)(node->voxel.voxel.k * 255.0);
+        texture[base + 7] = get_alpha_rgba(node->voxel.color);
 
         *next_free_block += LEAF_SIZE;
-        // ---- Fim da Lógica da Folha ----
         return;
     }
 
-    // --- Lógica do Nó Interno (igual a antes) ---
+    // Internal node logic
     size_t pai_base_addr = *next_free_block;
     *next_free_block += 1; 
     size_t ponteiro_bloco_addr = *next_free_block;
@@ -507,10 +549,19 @@ void _transform_node_to_texture(Octree *node,
     {
         if (node->children[i])
         {
-            size_t filho_addr = *next_free_block;
-            size_t ptr_slot_base = (ponteiro_bloco_addr + i) * 4;
-            _encode_pointer(filho_addr, &texture[ptr_slot_base], tex_dim);
-            _transform_node_to_texture(node->children[i], texture, next_free_block, tex_dim);
+            // CRITICAL FIX: Check if child is empty before writing pointer
+            size_t child_size = _octree_texel_size(node->children[i]);
+            
+            if (child_size > 0) {
+                size_t filho_addr = *next_free_block;
+                size_t ptr_slot_base = (ponteiro_bloco_addr + i) * 4;
+                _encode_pointer(filho_addr, &texture[ptr_slot_base], tex_dim);
+                _transform_node_to_texture(node->children[i], texture, next_free_block, tex_dim);
+            } else {
+                // Child is empty, write null pointer
+                size_t ptr_slot_base = (ponteiro_bloco_addr + i) * 4;
+                _encode_pointer(0, &texture[ptr_slot_base], tex_dim);
+            }
         }
         else
         {
@@ -533,7 +584,7 @@ uint8_t *octree_texture(Octree *tree, size_t *arr_size, size_t tex_dim) {
     // (Assumindo sizeof(ColorRGBA) == 4 bytes)
     *arr_size = voxel_count * 4; 
     
-    uint8_t *texture = (uint8_t*)calloc(1, *arr_size);
+    uint8_t *texture = (uint8_t*)calloc(voxel_count * 4, sizeof(uint8_t));
     if(!texture) return NULL;
     
     size_t next_free_block = 0;
@@ -544,9 +595,61 @@ uint8_t *octree_texture(Octree *tree, size_t *arr_size, size_t tex_dim) {
 }
 
 void octree_remove(Octree *tree, IVector3 coord) {
-    //find node with voxel with coord
-    //delete such voxel
-    //recursively test if parent node could be reduced
+    if (!tree) return;
+    
+    // Se está fora, ignora
+    if (_coord_is_outside(coord, tree->left_bot_back, tree->right_top_front)) return;
+
+    IVector3 size = ivec3_sub(tree->right_top_front, tree->left_bot_back);
+
+    // --- CASO BASE: Tamanho 1x1x1 (Atomic Voxel) ---
+    // SÓ AQUI podemos deletar de fato.
+    if (size.x <= 1 && size.y <= 1 && size.z <= 1) {
+        tree->has_voxel = false; 
+        return;
+    }
+
+    // --- LÓGICA DE UN-MERGE (Split Down) ---
+    // Se este nó não tem filhos (é uma folha na árvore), mas tem tamanho > 1 (é um blocão),
+    // e tem dados (é sólido), precisamos quebrá-lo antes de remover um pedaço.
+    if (!tree->children && tree->has_voxel) {
+        if (_split_node(tree) != 0) return; // Falha de memória
+    }
+
+    // Se depois de tentar dividir ele ainda não tem filhos, é porque era Ar (vazio).
+    // Não tem o que remover.
+    if (!tree->children) return;
+
+    // --- RECURSÃO ---
+    IVector3 mid;
+    mid.x = tree->left_bot_back.x + size.x / 2;
+    mid.y = tree->left_bot_back.y + size.y / 2;
+    mid.z = tree->left_bot_back.z + size.z / 2;
+    
+    int pos = _get_pos_in_octree(coord, mid);
+
+    octree_remove(tree->children[pos], coord);
+
+    // --- LIMPEZA (Merge Empty) ---
+    // Na volta, verificamos se todos os filhos ficaram vazios.
+    // Se sim, deletamos os filhos e marcamos este nó como Ar.
+    bool all_empty = true;
+    for(int i=0; i<8; i++) {
+        // Um filho não é vazio se tiver voxel OU se tiver netos
+        if (tree->children[i]->has_voxel || tree->children[i]->children) {
+            all_empty = false;
+            break;
+        }
+    }
+
+    if (all_empty) {
+        for(int i=0; i<8; i++) free(tree->children[i]);
+        free(tree->children);
+        tree->children = NULL;
+        tree->has_voxel = false; // Virou Ar
+    } 
+    // Opcional: Adicione _try_merge_children(tree) aqui se quiser que 
+    // remover um bloco e colocar outro igual funda novamente.
 }
 
 // CORRIGIDO: Esta é a correção CRÍTICA para evitar o stack overflow.

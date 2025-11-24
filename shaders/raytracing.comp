@@ -33,6 +33,7 @@ ivec3 worldSize = u_worldBoundsMax - u_worldBoundsMin;
 uniform vec4 globalLight;
 uniform vec3 lightDir;
 
+uniform ivec3 u_highlightedVoxel;
 
 /*
  * Estrutura de Retorno
@@ -150,29 +151,17 @@ VoxelData octreeFind(ivec3 worldPos, inout ivec3 minBound, inout ivec3 maxBound,
         // Comparação direta de inteiros (>= 255u)
         if (nodeData.a >= LEAF_FLAG) {            
             int linearIndex = toLinear(data.nodeCoord);
-            
-            // Lê coordenadas
-            ivec3 coordTexelCoord = fromLinear(linearIndex + 1);
-            uvec4 coordData = getNodeData(coordTexelCoord);
-
-            // Coordenada salva já é inteiro. Apenas cast para ivec3.
-            ivec3 storedCoord = ivec3(coordData.rgb);
 
             // Lê Propriedades
-            ivec3 propTexelCoord = fromLinear(linearIndex + 2);
+            ivec3 propTexelCoord = fromLinear(linearIndex + 1);
             uvec4 propData = getNodeData(propTexelCoord);
 
-            if (all(equal(storedCoord, worldPos)) && propData.a == 255u) {
-                // Precisamos converter a cor de volta para float (0.0-1.0) para o raymarcher
-                data.color.rgb = vec3(nodeData.rgb) / 255.0;
-                data.color.a = float(coordData.a) / 255.0;
-                
-                // decodeProperties original esperava vec4 float. Adaptamos:
-                vec4 propDataFloat = vec4(propData) / 255.0;
-                data.properties = decodeProperties(propDataFloat);
-
-                return data;
-            }
+            data.color.rgb = vec3(nodeData.rgb) / 255.0;
+            data.color.a = float(propData.a) / 255.0;
+            
+            // decodeProperties original esperava vec4 float. Adaptamos:
+            vec4 propDataFloat = vec4(propData) / 255.0;
+            data.properties = decodeProperties(propDataFloat);
             return data;
         }
 
@@ -180,7 +169,7 @@ VoxelData octreeFind(ivec3 worldPos, inout ivec3 minBound, inout ivec3 maxBound,
         if (nodeData.a <= INTERNAL_NODE_FLAG) {
             // Pega ponteiro direto (sem conversão de cor)
             ivec3 pointerBlockBaseCoord = decodePointer(nodeData.rgb);
-            ivec3 midPoint = data.nodeMin + ((data.nodeMax - data.nodeMin) >> 1); // Divisão por 2 via shift é mais rápida
+            ivec3 midPoint = data.nodeMin + ((data.nodeMax - data.nodeMin) >> 1);
             int childIndices = getchildIndices(worldPos, midPoint);
             
             int linearBaseIndex = toLinear(pointerBlockBaseCoord);
@@ -189,11 +178,6 @@ VoxelData octreeFind(ivec3 worldPos, inout ivec3 minBound, inout ivec3 maxBound,
             uvec4 childPointerData = getNodeData(childPointerCoord);
             ivec3 nextNode = decodePointer(childPointerData.rgb);
 
-            if (all(equal(nextNode, ivec3(0)))) {
-                data.color = vec4(0.0); // Mark as empty
-                return data;
-            }
-
             // Guarda as informações do nó pai
             currentNodeCoord = data.nodeCoord;
             minBound = data.nodeMin;
@@ -201,6 +185,12 @@ VoxelData octreeFind(ivec3 worldPos, inout ivec3 minBound, inout ivec3 maxBound,
 
             data.nodeCoord = nextNode;
             getChildBounds(childIndices, data.nodeMin, data.nodeMax);
+
+            if (all(equal(nextNode, ivec3(0)))) {
+                data.color = vec4(0.0); // Mark as empty
+                return data;
+            }
+            
             continue;
         }
         return data;
@@ -268,8 +258,13 @@ bool hitMarching(vec3 rayOrigin, vec3 rayDir, float rayIOF, out ivec3 hitMapPos,
         vec3 boxMin = vec3(hitVoxel.nodeMin);
         vec3 boxMax = vec3(hitVoxel.nodeMax);
 
-        float voxelSize = max(1.0, (boxMax.x - boxMin.x) * 0.125);
-        vec3 tMax = (step(0.0, rayDir) - fract((rayPos - boxMin) / voxelSize)) * invDir * voxelSize;
+        vec3 tPlane;
+        tPlane.x = (rayDir.x > 0.0 ? boxMax.x : boxMin.x) - rayPos.x;
+        tPlane.y = (rayDir.y > 0.0 ? boxMax.y : boxMin.y) - rayPos.y;
+        tPlane.z = (rayDir.z > 0.0 ? boxMax.z : boxMin.z) - rayPos.z;
+
+        // Tempo/Distância até as paredes
+        vec3 tMax = tPlane * invDir;
         
         // 3. Descubra qual face atingimos primeiro (o menor t)
         // Isso nos dá a NORMAL e a distância do passo.
@@ -342,8 +337,13 @@ bool inShadow(vec3 origin, vec3 lightDir) {
         vec3 boxMin = vec3(vox.nodeMin);
         vec3 boxMax = vec3(vox.nodeMax);
 
-        float voxelSize = max(1.0, (boxMax.x - boxMin.x) * 0.125);
-        vec3 tMax = (step(0.0, lightDir) - fract((rayPos - boxMin) / voxelSize)) * invDir * voxelSize;
+        vec3 tPlane;
+        tPlane.x = (lightDir.x > 0.0 ? boxMax.x : boxMin.x) - rayPos.x;
+        tPlane.y = (lightDir.y > 0.0 ? boxMax.y : boxMin.y) - rayPos.y;
+        tPlane.z = (lightDir.z > 0.0 ? boxMax.z : boxMin.z) - rayPos.z;
+
+        // Tempo/Distância até as paredes
+        vec3 tMax = tPlane * invDir;
         float tStep = min(tMax.x, min(tMax.y, tMax.z));
         int axis = (tMax.x < tMax.y) ? ((tMax.x < tMax.z) ? 0 : 2) : ((tMax.y < tMax.z) ? 1 : 2);
         
@@ -369,11 +369,11 @@ float getVoxelEdgeAO(vec3 hitPoint, vec3 normal) {
 
     // Calcula a distância para a borda mais próxima (0.0 = borda, 0.5 = centro)
     vec2 edgeDist = min(uv, 1.0 - uv);
-    float dist = min(edgeDist.x, edgeDist.y);
+    float dist = min(edgeDist.x, edgeDist.y) * 0.1;
 
     // Cria um gradiente suave: escuro na borda, claro no centro
     // Ajuste 0.05 para bordas mais grossas ou finas
-    return smoothstep(0.0, 0.1, dist);
+    return smoothstep(0.0, 0.4, dist);
 }
 
 vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
@@ -467,6 +467,11 @@ vec4 raymarching_fromDir(vec3 rayOrigin, vec3 rayDir) {
                                   (vec3(1.0) - currentRay.mediumColor.rgb));
             transmittedColor.rgb *= absorption;
         }
+
+        if(mapPos == u_highlightedVoxel){
+            surfaceColor = vec4(vec3(1.0) - surfaceColor.rgb, surfaceColor.a);
+            transmittedColor = vec4(vec3(1.0) - transmittedColor.rgb, transmittedColor.a);
+        } 
 
         // === TRANSPARENT/TRANSLUCENT SURFACES ===
         if (surfaceColor.a < 1) {

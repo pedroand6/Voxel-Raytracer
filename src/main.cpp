@@ -28,8 +28,8 @@ const float PLAYER_WIDTH = 1.6f;  // Voxel scale relative (1 voxel = 1 unit usua
 const float PLAYER_HEIGHT = 4.8f; // Standard height
 const float EYE_LEVEL = 4.7f;
 
-const float GRAVITY = 80.0f;
-const float JUMP_FORCE = 25.0f;
+const float GRAVITY = 9.81f;
+const float JUMP_FORCE = 8.0f;
 const float MOVE_SPEED = 20.0f;
 const float FRICTION = 2.0f;
 const float AIR_RESISTANCE = 1.0f;
@@ -46,6 +46,7 @@ bool worldDirty = false;       // Flag to tell us if we need to update GPU
 GLuint textureID; 
 GLuint pboID;
 size_t currentTexDim = 0; // Track texture size to know if we need to resize
+size_t tex_dim = 0;       // ADD THIS - Current texture dimension for shader uniform
 
 std::string computeSrc = ShaderUtils::readShaderFile("shaders/raytracing.comp");
 std::string quadVsSrc  = ShaderUtils::readShaderFile("shaders/quad.vert");
@@ -58,7 +59,7 @@ const char* quad_fs = quadFsSrc.c_str();
 const int screenWidth = 1280;
 const int screenHeight = 720;
 
-Camera camera(glm::vec3(64.0f, 60.0f, 64.0f)); // Adjusted camera start to be above ground
+Camera camera(glm::vec3(34.0f, 60.0f, 34.0f)); // Adjusted camera start to be above ground
 
 // Variáveis para o mouse
 float lastX = screenWidth / 2.0f;
@@ -198,27 +199,27 @@ void checkProgramLinking(GLuint program) {
 // Lista de todos os tipos de voxels possívels
 // IOF, Illumination, Metallicity
 Voxel voxels[] = {
-    {3.0f, 0.0f, 0.0f},   // VOX_SNOW (Matte, bright)
-    {3.0f, 0.0f, 0.0f},   // VOX_DIRT
-    {3.0f, 0.0f, 0.0f},   // VOX_DARK_WOOD (Trunks)
-    {3.0f, 0.0f, 0.0f},   // VOX_SAKURA_LEAVES
-    {1.33f, 0.0f, 0.0f},  // VOX_WATER
-    {3.0f, 0.0f, 0.0f},   // VOX_QUARTZ (House structure)
-    {1.52f, 0.0f, 0.0f},  // VOX_CLEAR_GLASS (High transparency)
+    {3.0f, 0.0f, 0.0f}, // VOX_GRASS
+    {3.0f, 0.0f, 0.0f}, // VOX_DIRT
+    {3.0f, 0.0f, 0.0f}, // VOX_WOOD
+    {3.0f, 0.0f, 0.0f}, // VOX_LEAVES
+    {1.33f, 0.0f, 0.0f}, // VOX_WATER
+    {3.0f, 0.0f, 0.0f},  // VOX_STONE
+    {1.5f, 0.0f, 0.0f},  // VOX_GLASS
     {2.42f, 0.0f, 0.0f},  // VOX_DIAMOND
-    {1.38f, 2.0f, 0.0f},  // VOX_LANTERN (Glowing)
-    {3.0f, 0.0f, 1.0f},   // VOX_MIRROR
+    {1.38f, 0.0f, 0.0f},  // VOX_JELLY
+    {3.0f, 0.0f, 1.0f},  // VOX_MIRROR
 };
 
-Voxel_Type VOX_SNOW = 0;
+Voxel_Type VOX_GRASS = 0;
 Voxel_Type VOX_DIRT = 1;
-Voxel_Type VOX_DARK_WOOD = 2;
-Voxel_Type VOX_SAKURA_LEAVES = 3;
+Voxel_Type VOX_WOOD = 2;
+Voxel_Type VOX_LEAVES = 3;
 Voxel_Type VOX_WATER = 4;
-Voxel_Type VOX_QUARTZ = 5;
-Voxel_Type VOX_CLEAR_GLASS = 6;
+Voxel_Type VOX_STONE = 5;
+Voxel_Type VOX_GLASS = 6;
 Voxel_Type VOX_DIAMOND = 7;
-Voxel_Type VOX_LANTERN = 8;
+Voxel_Type VOX_JELLY = 8;
 Voxel_Type VOX_MIRROR = 9;
 
 // Colors for the materials above (Simplification)
@@ -235,42 +236,58 @@ ColorRGBA voxelColors[] = {
     make_color_rgba(255, 255, 255, 255), // Mirror
 };
 
+void* memset(void* b, int c, size_t len) {
+    char* p = (char*)b;
+    for (size_t i = 0; i != len; ++i) {
+        p[i] = c;
+    }
+    return b;
+}
+
 void updateGPUTexture(Octree* tree) {
     size_t total_texels = _octree_texel_size(tree);
-    size_t tex_dim = (size_t)ceil(cbrt((double)total_texels));
+    
+    tex_dim = (size_t)ceil(cbrt((double)total_texels));
     if (tex_dim == 0) tex_dim = 1;
 
-    size_t arr_size;
-    uint8_t* texture_data = octree_texture(tree, &arr_size, tex_dim);
+    size_t arr_size_used;
+    uint8_t* texture_data = octree_texture(tree, &arr_size_used, tex_dim);
 
+    size_t total_texture_bytes = tex_dim * tex_dim * tex_dim * 4;
+
+    // NUCLEAR OPTION: Skip PBO entirely
     glActiveTexture(GL_TEXTURE0 + 2);
     glBindTexture(GL_TEXTURE_3D, textureID);
     
-    // Resize texture if the octree grew significantly
-    // (In a real engine you might allocate a large fixed size to avoid this)
-    if (tex_dim != currentTexDim) {
-        currentTexDim = tex_dim;
-        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8UI, (GLsizei)tex_dim, (GLsizei)tex_dim, (GLsizei)tex_dim, 0, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, NULL);
-        
-        // Reallocate PBO
-        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pboID);
-        glBufferData(GL_PIXEL_UNPACK_BUFFER, tex_dim*tex_dim*tex_dim*4, NULL, GL_STREAM_DRAW);
-    } else {
-        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pboID);
-    }
-
-    // Upload
-    void* gpu_pointer = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
-    if (gpu_pointer) {
-        memcpy(gpu_pointer, texture_data, arr_size);
-        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-        
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexSubImage3D(GL_TEXTURE_3D, 0, 0,0,0, (GLsizei)tex_dim, (GLsizei)tex_dim, (GLsizei)tex_dim, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, NULL);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    // Force reallocation by uploading with glTexImage3D (not glTexSubImage3D)
+    
+    // Prepare CPU-side buffer
+    uint8_t* full_texture = (uint8_t*)calloc(total_texture_bytes, sizeof(uint8_t));
+    if (!full_texture) {
+        free(texture_data);
+        return;
     }
     
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    memcpy(full_texture, texture_data, arr_size_used);
+    
+    // Upload texture data
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8UI, 
+                 (GLsizei)tex_dim, (GLsizei)tex_dim, (GLsizei)tex_dim, 
+                 0, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, full_texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    
+    // Check for GL errors
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        std::cerr << "OpenGL Error after texture upload: " << err << std::endl;
+    }
+    
+    glFinish();
+    
+    currentTexDim = tex_dim;
+    
+    free(full_texture);
     free(texture_data);
 }
 
@@ -385,162 +402,138 @@ int main(void)
     glm::vec4 global_light(1.0f, 1.0f, 1.0f, 1.0f);
     glm::vec3 light_dir = glm::normalize(glm::vec3(0.3481553f, 0.870388f, 0.3481553f));
 
-    // --- SCENE GENERATION: SNOWY SAKURA & GLASS MANSION ---
-    
-    // 1. BASE TERRAIN (Snow Plane)
-    int groundLevel = 18;
-    for (int x = 0; x < WORLD_SIZE_X; ++x) {
-        for (int z = 0; z < WORLD_SIZE_Z; ++z) {
-            // Fill dirt below
-            for(int y = 0; y < groundLevel - 2; ++y) {
-                 Voxel_Object voxel = VoxelObjCreate(voxels[VOX_DIRT], make_color_rgba(60, 40, 30, 255), {x, y, z});
-                 octree_insert(chunk0, voxel);
-            }
-            // Top layers are snow
-            for(int y = groundLevel - 2; y <= groundLevel; ++y) {
-                 Voxel_Object voxel = VoxelObjCreate(voxels[VOX_SNOW], make_color_rgba(240, 248, 255, 255), {x, y, z});
-                 octree_insert(chunk0, voxel);
-            }
+    // Room parameters (positioned near the center of the world)
+    int roomMinX = 12;
+    int roomMaxX = 51;
+    int roomMinZ = 12;
+    int roomMaxZ = 51;
+    int floorY = 20;
+    int wallHeight = 20;
+
+    // Create a grass floor
+    for (int x = roomMinX; x <= roomMaxX; ++x) {
+        for (int z = roomMinZ; z <= roomMaxZ; ++z) {
+            int index = x + floorY * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_GRASS], make_color_rgba(100, 200, 80, 255), {x, floorY, z});
+            octree_insert(chunk0, voxel);
         }
     }
 
-    // 2. THE HUGE GLASS MANSION
-    int houseCx = WORLD_SIZE_X / 2;
-    int houseCz = WORLD_SIZE_Z / 2;
-    int houseWidth = 70;  // Total width
-    int houseDepth = 60;  // Total depth
-    int houseStartY = groundLevel + 1;
-    
-    int hMinX = houseCx - houseWidth/2;
-    int hMaxX = houseCx + houseWidth/2;
-    int hMinZ = houseCz - houseDepth/2;
-    int hMaxZ = houseCz + houseDepth/2;
-
-    int floor1Height = 18;
-    int floor2Height = 16;
-    int roofHeight = 2;
-
-    // Construct the House
-    for (int x = hMinX; x <= hMaxX; ++x) {
-        for (int y = houseStartY; y <= houseStartY + floor1Height + floor2Height + roofHeight; ++y) {
-            for (int z = hMinZ; z <= hMaxZ; ++z) {
-                
-                // Determine relative height in house
-                int relY = y - houseStartY;
-                
-                // Check Borders
-                bool isWallX = (x == hMinX || x == hMaxX);
-                bool isWallZ = (z == hMinZ || z == hMaxZ);
-                bool isCorner = isWallX && isWallZ;
-                bool isPillar = (isWallX || isWallZ) && ((x % 15 == 0) || (z % 15 == 0)); // Structural pillars
-                
-                // Floors and Ceilings
-                bool isFloor1 = (relY == 0);
-                bool isCeiling1 = (relY == floor1Height);
-                bool isCeiling2 = (relY == floor1Height + floor2Height);
-                
-                // --- ARCHITECTURE LOGIC ---
-
-                // 1. Solid Quartz Foundation and Frame
-                if (isFloor1 || isCeiling1 || isCeiling2 || isCorner || (isPillar && !isCeiling2)) {
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_QUARTZ], make_color_rgba(235, 235, 235, 255), {x, y, z});
-                    octree_insert(chunk0, voxel);
-                }
-                // 2. Glass Curtain Walls (Huge windows reflecting forest)
-                else if (isWallX || isWallZ) {
-                    if (relY < floor1Height + floor2Height) {
-                         // Use low alpha for transparency simulation (if supported by shader logic)
-                         // Blue tint for glass
-                        Voxel_Object voxel = VoxelObjCreate(voxels[VOX_CLEAR_GLASS], make_color_rgba(200, 220, 255, 60), {x, y, z});
-                        octree_insert(chunk0, voxel);
-                    }
-                }
-                // 3. Interior details (Stairs/Lights)
-                // Add a central lantern/chandelier
-                else if (x == houseCx && z == houseCz && (relY == floor1Height - 2 || relY == floor1Height + floor2Height - 2)) {
-                     Voxel_Object voxel = VoxelObjCreate(voxels[VOX_LANTERN], make_color_rgba(255, 200, 100, 255), {x, y, z});
-                     octree_insert(chunk0, voxel);
-                }
-                // Rooftop Railing
-                else if (relY == floor1Height + floor2Height + 1) {
-                    if (x > hMinX && x < hMaxX && z > hMinZ && z < hMaxZ) {
-                         // Empty walking space on roof
-                    } else if (isWallX || isWallZ) {
-                         // Railing
-                         Voxel_Object voxel = VoxelObjCreate(voxels[VOX_MIRROR], make_color_rgba(100, 100, 100, 255), {x, y, z});
-                         octree_insert(chunk0, voxel);
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. SAKURA TREES (Procedural & Non-Concentrated)
-    srand(12345); // Seed for consistent generation
-    int numTrees = 350; // Lots of trees, but spread over 256x256
-    
-    for(int i = 0; i < numTrees; ++i) {
-        int tx = rand() % (WORLD_SIZE_X - 10) + 5;
-        int tz = rand() % (WORLD_SIZE_Z - 10) + 5;
-
-        // Do not spawn inside the house or too close to it
-        if (tx >= hMinX - 5 && tx <= hMaxX + 5 && tz >= hMinZ - 5 && tz <= hMaxZ + 5) {
-            continue;
-        }
-
-        int treeHeight = 8 + (rand() % 8); // Random height 8-16
-        int canopyRadius = 4 + (rand() % 3); // Big gorgeous canopy
-
-        // Trunk
-        for(int ty = groundLevel + 1; ty < groundLevel + treeHeight; ++ty) {
-            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_DARK_WOOD], make_color_rgba(60, 30, 10, 255), {tx, ty, tz});
+    // Build walls: 3 wood walls and 1 glass wall (glass will be on the +X side)
+    for (int y = floorY + 1; y <= floorY + wallHeight; ++y) {
+        // North wall (z = roomMinZ) - WOOD
+        for (int x = roomMinX; x <= roomMaxX; ++x) {
+            //int index = x + y * WORLD_SIZE_X + roomMinZ * WORLD_SIZE_X * WORLD_SIZE_Y;
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMinZ});
             octree_insert(chunk0, voxel);
         }
 
-        // Canopy (Spherical-ish clouds of pink)
-        int canopyCenterY = groundLevel + treeHeight;
-        for (int cx = tx - canopyRadius; cx <= tx + canopyRadius; ++cx) {
-            for (int cy = canopyCenterY - canopyRadius; cy <= canopyCenterY + canopyRadius; ++cy) {
-                for (int cz = tz - canopyRadius; cz <= tz + canopyRadius; ++cz) {
-                    // Bounds check
-                    if (cx < 0 || cx >= WORLD_SIZE_X || cy < 0 || cy >= WORLD_SIZE_Y || cz < 0 || cz >= WORLD_SIZE_Z) continue;
-
-                    float dist = sqrt(pow(cx - tx, 2) + pow(cy - canopyCenterY, 2) + pow(cz - tz, 2));
-                    
-                    if (dist < canopyRadius) {
-                        // Randomize pink shades for "gorgeous" detail
-                        int r = 255;
-                        int g = 180 + (rand() % 40); // 180-220
-                        int b = 190 + (rand() % 40); // 190-230
-                        
-                        // Randomly miss some voxels to make leaves look airy, not solid blocks
-                        if ((rand() % 10) > 1) { 
-                            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_SAKURA_LEAVES], make_color_rgba(r, g, b, 255), {cx, cy, cz});
-                            octree_insert(chunk0, voxel);
-                        }
-                    }
-                }
-            }
+        // South wall (z = roomMaxZ) - WOOD
+        for (int x = roomMinX; x <= roomMaxX; ++x) {
+            //int index = x + y * WORLD_SIZE_X + roomMaxZ * WORLD_SIZE_X * WORLD_SIZE_Y;
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMaxZ});
+            octree_insert(chunk0, voxel);
         }
 
-        // Fallen Petals on the snow (detail)
-        for(int fx = tx - canopyRadius; fx <= tx + canopyRadius; ++fx) {
-            for(int fz = tz - canopyRadius; fz <= tz + canopyRadius; ++fz) {
-                if (rand() % 20 == 0 && fx >= 0 && fx < WORLD_SIZE_X && fz >= 0 && fz < WORLD_SIZE_Z) {
-                    // Place on top of snow
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_SAKURA_LEAVES], make_color_rgba(255, 192, 203, 255), {fx, groundLevel + 1, fz});
+        // West wall (x = roomMinX) - WOOD
+        for (int z = roomMinZ; z <= roomMaxZ; ++z) {
+            //int index = roomMinX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {roomMinX, y, z});
+            octree_insert(chunk0, voxel);
+        }
+
+        // East wall (x = roomMaxX) - GLASS
+        for (int z = roomMinZ; z <= roomMaxZ; ++z) {
+            //int index = roomMaxX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_GLASS], make_color_rgba(100, 100, 230, 40), {roomMaxX, y, z});
+            octree_insert(chunk0, voxel);
+        }
+    }
+
+    // Create a red jelly sphere inside the room
+    int cx = (roomMinX + roomMaxX) / 2;
+    int cz = (roomMinZ + roomMaxZ) / 2;
+    int cy = floorY + 6;
+    int radius = 5;
+
+    // Add a margin to ensure border voxels are included
+    // A voxel "touches" the sphere if any part of it intersects
+    // The farthest corner of a voxel from its center is sqrt(3)*0.5 ≈ 0.866
+    const float voxelMargin = 0.87f; // Slightly more than sqrt(3)/2
+
+    for (int x = cx - radius - 1; x <= cx + radius + 1; ++x) {
+        for (int y = cy - radius - 1; y <= cy + radius + 1; ++y) {
+            for (int z = cz - radius - 1; z <= cz + radius + 1; ++z) {
+                if (x < 0 || x >= WORLD_SIZE_X || y < 0 || y >= WORLD_SIZE_Y || z < 0 || z >= WORLD_SIZE_Z) continue;
+                
+                // Calculate distance from voxel center to sphere center
+                float dx = (float)(x - cx);
+                float dy = (float)(y - cy);
+                float dz = (float)(z - cz);
+                float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+                
+                // Include voxel if it intersects the sphere
+                // (distance from center to voxel center <= radius + margin)
+                if (dist <= (float)radius + voxelMargin) {
+                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_JELLY], 
+                        make_color_rgba(240, 100, 100, 100), {x, y, z});
                     octree_insert(chunk0, voxel);
                 }
             }
         }
     }
 
+    // --- Giant soccer ball outside the room ---
+    // Position the ball to the +X side of the room, but still inside world bounds.
+    int ball_cx = roomMaxX + 15;
+    int ball_cz = (roomMinZ + roomMaxZ) / 2 + 8;
+    int ball_cy = floorY + 8;
+    int ball_radius = 12;
 
-    // --- END OF SCENE GENERATION ---
+    // Ensure the ball center is inside the world; clamp if necessary.
+    if (ball_cx < 0) ball_cx = 0;
+    if (ball_cx >= WORLD_SIZE_X) ball_cx = WORLD_SIZE_X - 1;
+    if (ball_cz < 0) ball_cz = 0;
+    if (ball_cz >= WORLD_SIZE_Z) ball_cz = WORLD_SIZE_Z - 1;
+    if (ball_cy < 0) ball_cy = 0;
+    if (ball_cy >= WORLD_SIZE_Y) ball_cy = WORLD_SIZE_Y - 1;
 
-    size_t total_texels = _octree_texel_size(chunk0);
-    size_t tex_dim = (size_t)ceil(cbrt((double)total_texels));
-    if (tex_dim == 0) tex_dim = 1;
+    // Use a spherical mapping pattern (latitude/longitude quantized) to approximate soccer patches.
+    const float PI = acosf(-1.0f);
+    const float patchAngle = PI / 3.0f; // controls patch size; tweak for different look
+
+    for (int x = ball_cx - ball_radius; x <= ball_cx + ball_radius; ++x) {
+        for (int y = ball_cy - ball_radius; y <= ball_cy + ball_radius; ++y) {
+            for (int z = ball_cz - ball_radius; z <= ball_cz + ball_radius; ++z) {
+                if (x < 0 || x >= WORLD_SIZE_X || y < 0 || y >= WORLD_SIZE_Y || z < 0 || z >= WORLD_SIZE_Z) continue;
+                int dx = x - ball_cx; int dy = y - ball_cy; int dz = z - ball_cz;
+                float dist2 = (float)(dx*dx + dy*dy + dz*dz);
+                if (dist2 > (float)(ball_radius*ball_radius)) continue; // outside sphere
+
+                float rlen = sqrtf(dist2);
+                // Avoid division by zero
+                if (rlen < 1e-6f) rlen = 1e-6f;
+
+                // Spherical coords: theta in [0, 2PI), phi in [0, PI]
+                float theta = atan2f((float)dz, (float)dx) + PI; // [0, 2PI) 
+                float phi = acosf(((float)dy) / rlen); // [0, PI]
+
+                int a = (int)floorf(theta / patchAngle);
+                int b = (int)floorf(phi / patchAngle);
+
+                // Checker of latitude/longitude cells gives a soccer-like patch pattern
+                bool whitePatch = ((a + b) & 1) == 0;
+
+                if (whitePatch) {
+                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_STONE], make_color_rgba(240, 240, 240, 255), {x, y, z}); // white
+                    octree_insert(chunk0, voxel);
+                } else {
+                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(20, 20, 20, 255), {x, y, z}); // black
+                    octree_insert(chunk0, voxel);
+                }
+            }
+        }
+    }
 
     float voxelScale = 1.0; // A escala do voxel no mundo, ex: 2.0 significa 1 voxel a cada 0.5 unidades de espaço
 
@@ -599,6 +592,7 @@ int main(void)
     GLint maxBoundsLoc = glGetUniformLocation(computeProgram, "u_worldBoundsMax");
     GLint globalLightLoc = glGetUniformLocation(computeProgram, "globalLight");
     GLint lightDirLoc = glGetUniformLocation(computeProgram, "lightDir");
+    GLint highlightedVoxLoc = glGetUniformLocation(computeProgram, "u_highlightedVoxel");
 
     // Configurar os shaders do Quad
     const GLuint quad_vertex_shader = glCreateShader(GL_VERTEX_SHADER);
@@ -689,6 +683,7 @@ int main(void)
         static bool rightWasDown = false;
 
         // 1. Raycast to find what we are looking at
+        
         Ray ray;
         ray.origin = {camera.Position.x, camera.Position.y, camera.Position.z};
         ray.direction = {camera.Front.x, camera.Front.y, camera.Front.z};
@@ -700,14 +695,26 @@ int main(void)
             highlightedVoxel = glm::ivec3(-1);
         }
 
+        if (hitNode && hitNode->has_voxel) {
+            IVector3 voxCoord = hitNode->voxel.coord;
+            IVector3 nodeMin = hitNode->left_bot_back;
+            IVector3 nodeMax = hitNode->right_top_front;
+        }
+
         // 2. Handle Clicks
         // LEFT CLICK: DESTROY
         if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS && !leftWasDown) {
             if (highlightedVoxel.x != -1) {
-                // IMPORTANT: This calls the function you haven't implemented yet.
-                // It will crash if octree_remove isn't linked, so I added a stub at top.
                 IVector3 target = {highlightedVoxel.x, highlightedVoxel.y, highlightedVoxel.z};
-                octree_remove(chunk0, target); 
+                
+                // Check if voxel exists BEFORE removal
+                Voxel_Object before = octree_find(chunk0, target);
+                
+                octree_remove(chunk0, target);
+                
+                // Check if voxel exists AFTER removal
+                Voxel_Object after = octree_find(chunk0, target);
+                
                 worldDirty = true;
             }
         }
@@ -716,11 +723,8 @@ int main(void)
         // RIGHT CLICK: BUILD
         if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS && !rightWasDown) {
             if (highlightedVoxel.x != -1) {
-                std::cout << "coord: " << highlightedVoxel.x << " " << highlightedVoxel.y << " " << highlightedVoxel.z << std::endl;
-                printf("color: %d %d %d\n\n", get_red_rgba(hitNode->voxel.color), get_blue_rgba(hitNode->voxel.color), get_green_rgba(hitNode->voxel.color));
                 // Find WHERE to place (Neighbor)
-                //glm::ivec3 placeCoord = get_placement_coord(camera.Position, camera.Front, highlightedVoxel);
-                glm::ivec3 placeCoord = highlightedVoxel + glm::ivec3{0, 1, 0};
+                glm::ivec3 placeCoord = get_placement_coord(camera.Position, camera.Front, highlightedVoxel);
 
                 // Don't place inside player
                 glm::vec3 pPos = camera.Position; pPos.y -= EYE_LEVEL;
@@ -740,7 +744,15 @@ int main(void)
 
         // 3. Update GPU if dirty
         if (worldDirty) {
+            // CRITICAL: Unbind texture BEFORE updating
+            glActiveTexture(GL_TEXTURE0 + 2);
+            glBindTexture(GL_TEXTURE_3D, 0);
+            
             updateGPUTexture(chunk0);
+            
+            // Force rebind after update
+            glBindTexture(GL_TEXTURE_3D, textureID);
+            
             worldDirty = false;
         }
 
@@ -757,19 +769,22 @@ int main(void)
 
         glActiveTexture(GL_TEXTURE0 + 2);
         glBindTexture(GL_TEXTURE_3D, textureID);
+
         glUniform1i(texDimLoc, (GLint)tex_dim);
         glUniform1f(voxScaleLoc, (GLfloat)voxelScale);
         glUniform3iv(minBoundsLoc, 1, (const GLint*)&min_bounds);
         glUniform3iv(maxBoundsLoc, 1, (const GLint*)&max_bounds);
         glUniform4fv(globalLightLoc, 1, (const GLfloat*)&global_light);
         glUniform3fv(lightDirLoc, 1, (const GLfloat*)&light_dir);
+        glUniform3iv(highlightedVoxLoc, 1, (const GLint*)&highlightedVoxel);
+
+        // GARANTE QUE A ATUALIZAÇÃO DA TEXTURA (glTexSubImage3D) TERMINOU
+        glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 
         // Dispara os threads do compute shader.
         // Dividimos o tamanho da tela pelo tamanho do grupo de trabalho definido no shader.
         // Se o tamanho do grupo for 8x8, por exemplo:
         glDispatchCompute(screenWidth / 8, screenHeight / 8, 1);
-
-        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 
         // Desenhar o quad na tela
         int width, height;
