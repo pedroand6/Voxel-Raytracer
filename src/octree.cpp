@@ -20,7 +20,7 @@ extern "C" {
 
 #define CHILDREN_COUNT 8
 
-#define LEAF_SIZE 3
+#define LEAF_SIZE 2
 
 enum pos_in_octree {
     LEFTBOTBACK,
@@ -420,7 +420,7 @@ Octree* octree_ray_cast(Octree *root, Ray ray, Vector3 worldMin, Vector3 worldMa
     mapPos.z = (int)floorf(rayPos.z);
 
     // Estado atual do Voxel
-    IVector3 nodeMin = {0,0,0}, nodeMax = {0,0,0};
+    IVector3 nodeMin = ivec3_vec3(worldMin), nodeMax = ivec3_vec3(worldMax);
     Octree *currNode = NULL;
 
     // Limite de passos (segurança)
@@ -428,7 +428,6 @@ Octree* octree_ray_cast(Octree *root, Ray ray, Vector3 worldMin, Vector3 worldMa
 
     for (int i = 0; i < maxSteps; i++) {
         // Busca o nó atual na árvore e seus limites
-        // (Sempre reinicia da raiz para garantir precisão, igual ao shader "safe")
         currNode = _octree_find_leaf(root, mapPos, &nodeMin, &nodeMax);
 
         // Se encontrou um nó válido COM voxel e Y válido, é um HIT!
@@ -446,7 +445,8 @@ Octree* octree_ray_cast(Octree *root, Ray ray, Vector3 worldMin, Vector3 worldMa
 
         // Descobre o menor passo positivo (qual parede atingimos)
         // Adicionamos epsilon para garantir cruzamento
-        float tStep = fmin_fl(tMaxX, fmin_fl(tMaxY, tMaxZ)) + 0.0001f;
+        float tStep = fmin_fl(tMaxX, fmin_fl(tMaxY, tMaxZ));
+        int axis = (tMaxX < tMaxY) ? ((tMaxX < tMaxZ) ? 0 : 2) : ((tMaxY < tMaxZ) ? 1 : 2);
         
         // Proteção contra passos muito pequenos (travamento numérico)
         if (tStep < 0.0001f) tStep = 0.0001f;
@@ -457,10 +457,19 @@ Octree* octree_ray_cast(Octree *root, Ray ray, Vector3 worldMin, Vector3 worldMa
         rayPos.z += rayDir.z * tStep;
 
         // Empurra levemente para dentro do vizinho (igual ao shader)
-        Vector3 testPos;
-        testPos.x = rayPos.x + rayDir.x * 0.001f;
-        testPos.y = rayPos.y + rayDir.y * 0.001f;
-        testPos.z = rayPos.z + rayDir.z * 0.001f;
+        Vector3 testPos = rayPos;
+        switch (axis)
+        {
+        case 0:
+            testPos.x += rayDir.x * 0.001f;
+            break;
+        case 1:
+            testPos.y += rayDir.y * 0.001f;
+            break;
+        case 2:
+            testPos.z += rayDir.z * 0.001f;
+            break;
+        }
 
         mapPos.x = (int)floorf(testPos.x);
         mapPos.y = (int)floorf(testPos.y);

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -38,12 +39,12 @@ glm::vec3 playerVelocity(0.0f);
 bool isGrounded = false;
 
 // --- BUILD STATE ---
-int selectedMaterialIndex = 2; // Default to Wood
+int selectedMaterialIndex = 10; // Default to Light
 bool worldDirty = false;       // Flag to tell us if we need to update GPU
 
 // --- GL GLOBALS ---
 // We make these global (or struct members) so the update function can access them
-GLuint textureID; 
+GLuint textureID, voxelTexID; 
 GLuint pboID;
 size_t currentTexDim = 0; // Track texture size to know if we need to resize
 size_t tex_dim = 0;       // ADD THIS - Current texture dimension for shader uniform
@@ -209,6 +210,7 @@ Voxel voxels[] = {
     {2.42f, 0.0f, 0.0f},  // VOX_DIAMOND
     {1.38f, 0.0f, 0.0f},  // VOX_JELLY
     {3.0f, 0.0f, 1.0f},  // VOX_MIRROR
+    {3.0f, 1.0f, 0.0f}, // LIGHT
 };
 
 Voxel_Type VOX_GRASS = 0;
@@ -221,6 +223,7 @@ Voxel_Type VOX_GLASS = 6;
 Voxel_Type VOX_DIAMOND = 7;
 Voxel_Type VOX_JELLY = 8;
 Voxel_Type VOX_MIRROR = 9;
+Voxel_Type VOX_LIGHT = 10;
 
 // Colors for the materials above (Simplification)
 ColorRGBA voxelColors[] = {
@@ -234,15 +237,8 @@ ColorRGBA voxelColors[] = {
     make_color_rgba(0, 255, 255, 255),   // Diamond
     make_color_rgba(255, 100, 100, 180), // Jelly
     make_color_rgba(255, 255, 255, 255), // Mirror
+    make_color_rgba(255, 210, 210, 255), // Light
 };
-
-void* memset(void* b, int c, size_t len) {
-    char* p = (char*)b;
-    for (size_t i = 0; i != len; ++i) {
-        p[i] = c;
-    }
-    return b;
-}
 
 void updateGPUTexture(Octree* tree) {
     size_t total_texels = _octree_texel_size(tree);
@@ -384,6 +380,24 @@ int main(void)
 
     glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
 
+    // Textura com os ids de cada voxel
+    GLuint voxelTexID;
+    glGenTextures(1, &voxelTexID);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, voxelTexID);
+
+    // Configurar a textura para ter o tamanho da tela, sem dados iniciais.
+    // Usamos RGBA8 para ter 4 canais de 8 bits para a cor.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32I, screenWidth, screenHeight, 0, GL_RG_INTEGER, GL_INT, NULL);
+
+    // Configurações da textura
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+    glBindImageTexture(3, voxelTexID, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RG32I);
+
     // Initialize Global GL objects
     glGenTextures(1, &textureID);
     glBindTexture(GL_TEXTURE_3D, textureID);
@@ -399,7 +413,7 @@ int main(void)
     glm::ivec3 max_bounds(WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z);
     Octree* chunk0 = octree_create(NULL, {0, 0, 0}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
 
-    glm::vec4 global_light(1.0f, 1.0f, 1.0f, 1.0f);
+    glm::vec4 global_light(0.3f, 0.3f, 0.3f, 1.0f);
     glm::vec3 light_dir = glm::normalize(glm::vec3(0.3481553f, 0.870388f, 0.3481553f));
 
     // Room parameters (positioned near the center of the world)
@@ -614,6 +628,10 @@ int main(void)
     glUniform1i(glGetUniformLocation(quadProgram, "screenTexture"), 0);
 
     float now, lastTime = 0.0f;
+    int frameCount = 0;
+    glm::vec3 lastCameraPos = camera.Position;
+    glm::vec3 lastCameraDir = camera.Front;
+
     // Dentro do seu game loop
     while (!glfwWindowShouldClose(window)) {
         now = (float)glfwGetTime();
@@ -766,9 +784,11 @@ int main(void)
         
         // Vincular recursos
         glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
+        glBindImageTexture(3, voxelTexID, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RG32I);
 
         glActiveTexture(GL_TEXTURE0 + 2);
         glBindTexture(GL_TEXTURE_3D, textureID);
+
 
         glUniform1i(texDimLoc, (GLint)tex_dim);
         glUniform1f(voxScaleLoc, (GLfloat)voxelScale);
@@ -786,6 +806,8 @@ int main(void)
         // Se o tamanho do grupo for 8x8, por exemplo:
         glDispatchCompute(screenWidth / 8, screenHeight / 8, 1);
 
+        frameCount++;
+
         // Desenhar o quad na tela
         int width, height;
         glfwGetFramebufferSize(window, &width, &height);
@@ -797,6 +819,9 @@ int main(void)
         
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, outputTexture);
+
+        glActiveTexture(GL_TEXTURE0 + 1);
+        glBindTexture(GL_TEXTURE_2D, voxelTexID);
         
         glBindVertexArray(quadVAO);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, quadEBO);
@@ -810,6 +835,7 @@ int main(void)
     glDeleteBuffers(1, &quadEBO);
     glDeleteBuffers(1, &pboID);
     glDeleteTextures(1, &textureID);
+    glDeleteTextures(1, &voxelTexID);
     glDeleteTextures(1, &outputTexture);
     glDeleteShader(compute_raytracing);
     glDeleteProgram(computeProgram);
