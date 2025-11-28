@@ -32,7 +32,7 @@ ifeq ($(OS), Windows_NT)
 	REMOVE = rmdir /s /q
 	TARGET_EXT = .exe
 else
-	LIBS = -lpthread -lglfw3dll -lvmm -lm
+	LIBS = -lpthread -lglfw -lvmm -lm
 	REMOVE = rm -rf
 	TARGET_EXT =
 endif
@@ -60,13 +60,12 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 
 # Rule to create the build directory
 $(OBJ_DIR):
-	mkdir -p $@
+	mkdir $@
 
 # --- Clean Rules ---
 clean_all: clean
 
 clean:
-	$(REMOVE) -p
 	$(REMOVE) $(OBJ_DIR) $(FINAL)$(TARGET_EXT)
 
 # Phony targets aren't real files

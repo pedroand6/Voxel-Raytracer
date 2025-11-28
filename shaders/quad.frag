@@ -32,7 +32,7 @@ void main()
     int centerDist = centerData.g;
 
     // Se o ID for negativo (fundo/céu), não faz média, apenas repassa a cor.
-    if (centerID < 0) {
+    if (centerID == 0) {
         FragColor = texelFetch(screenTexture, pixelPos, 0);
         return;
     }

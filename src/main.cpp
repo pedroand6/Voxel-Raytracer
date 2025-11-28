@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#define FNL_IMPL
+#include <FastNoiseLite.h>
+
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
@@ -15,16 +18,20 @@
 #include <Camera.hpp>
 #include <voxel.hpp>
 #include <octree.hpp>
+#include <voxReader.hpp>
 
 extern "C" {
     #include <color.h>
 }
 
-#define WORLD_SIZE_X 256
-#define WORLD_SIZE_Y 256
-#define WORLD_SIZE_Z 256
+#define WORLD_SIZE_X 1024
+#define WORLD_SIZE_Y 1024
+#define WORLD_SIZE_Z 1024
+
+#define MIN_HEIGHT -1024
 
 // --- PHYSICS CONSTANTS ---
+bool CREATIVE = true;
 const float PLAYER_WIDTH = 1.6f;  // Voxel scale relative (1 voxel = 1 unit usually)
 const float PLAYER_HEIGHT = 4.8f; // Standard height
 const float EYE_LEVEL = 4.7f;
@@ -39,7 +46,7 @@ glm::vec3 playerVelocity(0.0f);
 bool isGrounded = false;
 
 // --- BUILD STATE ---
-int selectedMaterialIndex = 10; // Default to Light
+int selectedMaterialIndex = 2; // Default to Light - 10
 bool worldDirty = false;       // Flag to tell us if we need to update GPU
 
 // --- GL GLOBALS ---
@@ -93,10 +100,8 @@ unsigned int quadIndices[] = {
 bool isVoxelSolid(Octree* tree, int x, int y, int z) {
     IVector3 coord = {x, y, z};
     Voxel_Object v = octree_find(tree, coord);
-    
-    // In your octree code, _invalid_voxel sets y = MIN_HEIGHT (-256)
-    // If the returned voxel has a Y > MIN_HEIGHT, it is a real voxel.
-    return (v.coord.y > -256);
+
+    return (v.coord.y > MIN_HEIGHT);
 }
 
 // AABB Collision Detection
@@ -135,24 +140,37 @@ static void key_callback(GLFWwindow* window, int key, int scancode, int action, 
 }
 
 void processInput(GLFWwindow *window) {
-    glm::vec3 forward = glm::normalize(glm::vec3(camera.Front.x, 0.0f, camera.Front.z));
-    glm::vec3 right = glm::normalize(glm::vec3(camera.Right.x, 0.0f, camera.Right.z));
-    glm::vec3 wishDir(0.0f);
-
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) wishDir += forward;
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) wishDir -= forward;
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) wishDir -= right;
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) wishDir += right;
-
-    if (glm::length(wishDir) > 0.01f) {
-        wishDir = glm::normalize(wishDir);
-        playerVelocity.x += wishDir.x * MOVE_SPEED * deltaTime;
-        playerVelocity.z += wishDir.z * MOVE_SPEED * deltaTime;
+    if(CREATIVE){
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+            camera.ProcessKeyboard(FORWARD, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+            camera.ProcessKeyboard(BACKWARD, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+            camera.ProcessKeyboard(LEFT, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+            camera.ProcessKeyboard(RIGHT, deltaTime);
+        
     }
+    else{
+        glm::vec3 forward = glm::normalize(glm::vec3(camera.Front.x, 0.0f, camera.Front.z));
+        glm::vec3 right = glm::normalize(glm::vec3(camera.Right.x, 0.0f, camera.Right.z));
+        glm::vec3 wishDir(0.0f);
 
-    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && isGrounded) {
-        playerVelocity.y = JUMP_FORCE;
-        isGrounded = false;
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) wishDir += forward;
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) wishDir -= forward;
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) wishDir -= right;
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) wishDir += right;
+
+        if (glm::length(wishDir) > 0.01f) {
+            wishDir = glm::normalize(wishDir);
+            playerVelocity.x = wishDir.x * MOVE_SPEED * deltaTime;
+            playerVelocity.z = wishDir.z * MOVE_SPEED * deltaTime;
+        }
+
+        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && isGrounded) {
+            playerVelocity.y = JUMP_FORCE;
+            isGrounded = false;
+        }
     }
 }
 
@@ -240,6 +258,9 @@ ColorRGBA voxelColors[] = {
     make_color_rgba(255, 210, 210, 255), // Light
 };
 
+uint8_t* render_buffer = NULL;
+size_t render_buffer_size = 0;
+
 void updateGPUTexture(Octree* tree) {
     size_t total_texels = _octree_texel_size(tree);
     
@@ -249,7 +270,17 @@ void updateGPUTexture(Octree* tree) {
     size_t arr_size_used;
     uint8_t* texture_data = octree_texture(tree, &arr_size_used, tex_dim);
 
-    size_t total_texture_bytes = tex_dim * tex_dim * tex_dim * 4;
+    size_t needed_size = tex_dim * tex_dim * tex_dim * 4;
+    
+    // Only reallocate if we need more space
+    if (render_buffer_size < needed_size) {
+        if (render_buffer) free(render_buffer);
+        render_buffer = (uint8_t*)calloc(needed_size, 1);
+        render_buffer_size = needed_size;
+    } else {
+        // Just clear it
+        memset(render_buffer, 0, needed_size);
+    }
 
     // NUCLEAR OPTION: Skip PBO entirely
     glActiveTexture(GL_TEXTURE0 + 2);
@@ -257,20 +288,13 @@ void updateGPUTexture(Octree* tree) {
     
     // Force reallocation by uploading with glTexImage3D (not glTexSubImage3D)
     
-    // Prepare CPU-side buffer
-    uint8_t* full_texture = (uint8_t*)calloc(total_texture_bytes, sizeof(uint8_t));
-    if (!full_texture) {
-        free(texture_data);
-        return;
-    }
-    
-    memcpy(full_texture, texture_data, arr_size_used);
+    memcpy(render_buffer, texture_data, arr_size_used);
     
     // Upload texture data
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8UI, 
                  (GLsizei)tex_dim, (GLsizei)tex_dim, (GLsizei)tex_dim, 
-                 0, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, full_texture);
+                 0, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, render_buffer);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     
     // Check for GL errors
@@ -283,7 +307,6 @@ void updateGPUTexture(Octree* tree) {
     
     currentTexDim = tex_dim;
     
-    free(full_texture);
     free(texture_data);
 }
 
@@ -335,6 +358,49 @@ glm::ivec3 get_placement_coord(glm::vec3 origin, glm::vec3 dir, glm::ivec3 targe
     }
 
     return placement;
+}
+
+// Bad Apple
+void ReadBadAppleFrame(Octree* tree, int frame) {
+    FILE *f = fopen("bad_apple.txt", "rb");
+    if (!f) {
+        printf("Error: Could not open bad_apple.txt\n");
+        return;
+    }
+
+    // 1. SEEK: Calculate where this frame starts in the file
+    // Each pixel is 1 byte (char '0' or '1')
+    long frame_size = 640 * 480;
+    long offset = (long)frame * frame_size;
+
+    // Move file cursor to the start of the requested frame
+    fseek(f, offset, SEEK_SET);
+
+    uint8_t buffer[640];
+    Voxel stone = voxels[VOX_STONE];
+
+    // 2. LOOP: Iterate exactly through the height
+    for (int y = 0; y < 480; y++) {
+        
+        // Read exactly one row
+        size_t read_count = fread(buffer, 1, 640, f);
+        
+        // Safety check: if file ended unexpectedly
+        if (read_count < 640) break; 
+
+        for (int x = 0; x < 640; x++) {
+            // 3. LOGIC: Check for the CHARACTER '1' (ASCII 49)
+            // Note: Inverted Y usually matches image coordinates better in Octrees
+            if (buffer[x] == '1') {
+                octree_insert(tree, VoxelObjCreate(stone, COLOR_WHITEA, {x, 0, y}));
+            } else {
+                // Optional: Insert black, or just skip to keep it sparse/transparent
+                octree_insert(tree, VoxelObjCreate(stone, COLOR_BLACKA, {x, 0, y}));
+            }
+        }
+    }
+
+    fclose(f);
 }
 
 int main(void)
@@ -409,145 +475,165 @@ int main(void)
 
     glGenBuffers(1, &pboID);
 
-    glm::ivec3 min_bounds(0, 0, 0);
+    glm::ivec3 min_bounds(-WORLD_SIZE_X + 1, -WORLD_SIZE_Y + 1, -WORLD_SIZE_Z + 1);
     glm::ivec3 max_bounds(WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z);
-    Octree* chunk0 = octree_create(NULL, {0, 0, 0}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
+    Octree* chunk0 = octree_create(NULL, {-WORLD_SIZE_X + 1, -WORLD_SIZE_Y + 1, -WORLD_SIZE_Z + 1}, {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z});
 
-    glm::vec4 global_light(0.3f, 0.3f, 0.3f, 1.0f);
+    glm::vec4 global_light(1.0f, 1.0f, 1.0f, 1.0f);
     glm::vec3 light_dir = glm::normalize(glm::vec3(0.3481553f, 0.870388f, 0.3481553f));
 
+    load_vox_file("maps/dragon.vox", chunk0, 0, 0, 0);
+
+    // FastNoiseLite noise;
+    // noise.SetNoiseType(FastNoiseLite::NoiseType_Perlin);
+    // for(int i = 0; i < 256; i++) {
+    //     for(int j = 0; j < 256; j++) {
+    //         int height = (int)((noise.GetNoise((float)j, (float)i) + 1.0) * 33.0) + 30;
+    //         for(int h = 20; h < height; h++) {
+    //             Voxel_Object voxel;
+    //             if(h == 20 || h == 21)
+    //                 voxel = VoxelObjCreate(voxels[VOX_STONE], voxelColors[VOX_STONE], {j, h, i});
+    //             else if(h == height - 1)
+    //                 voxel = VoxelObjCreate(voxels[VOX_DIRT], voxelColors[VOX_DIRT], {j, h, i});
+    //             else
+    //                 voxel = VoxelObjCreate(voxels[VOX_GRASS], voxelColors[VOX_GRASS], {j, h, i});
+    //             octree_insert(chunk0, voxel);
+    //         }
+    //     }
+    // }
+
     // Room parameters (positioned near the center of the world)
-    int roomMinX = 12;
-    int roomMaxX = 51;
-    int roomMinZ = 12;
-    int roomMaxZ = 51;
-    int floorY = 20;
-    int wallHeight = 20;
+    // int roomMinX = 12;
+    // int roomMaxX = 51;
+    // int roomMinZ = 12;
+    // int roomMaxZ = 51;
+    // int floorY = 20;
+    // int wallHeight = 20;
 
-    // Create a grass floor
-    for (int x = roomMinX; x <= roomMaxX; ++x) {
-        for (int z = roomMinZ; z <= roomMaxZ; ++z) {
-            int index = x + floorY * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_GRASS], make_color_rgba(100, 200, 80, 255), {x, floorY, z});
-            octree_insert(chunk0, voxel);
-        }
-    }
+    // // Create a grass floor
+    // for (int x = roomMinX; x <= roomMaxX; ++x) {
+    //    for (int z = roomMinZ; z <= roomMaxZ; ++z) {
+    //        int index = x + floorY * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+    //        Voxel_Object voxel = VoxelObjCreate(voxels[VOX_GRASS], make_color_rgba(100, 200, 80, 255), {x, floorY, z});
+    //        octree_insert(chunk0, voxel);
+    //    }
+    // }
 
-    // Build walls: 3 wood walls and 1 glass wall (glass will be on the +X side)
-    for (int y = floorY + 1; y <= floorY + wallHeight; ++y) {
-        // North wall (z = roomMinZ) - WOOD
-        for (int x = roomMinX; x <= roomMaxX; ++x) {
-            //int index = x + y * WORLD_SIZE_X + roomMinZ * WORLD_SIZE_X * WORLD_SIZE_Y;
-            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMinZ});
-            octree_insert(chunk0, voxel);
-        }
+    // // Build walls: 3 wood walls and 1 glass wall (glass will be on the +X side)
+    // for (int y = floorY + 1; y <= floorY + wallHeight; ++y) {
+    //    // North wall (z = roomMinZ) - WOOD
+    //    for (int x = roomMinX; x <= roomMaxX; ++x) {
+    //        //int index = x + y * WORLD_SIZE_X + roomMinZ * WORLD_SIZE_X * WORLD_SIZE_Y;
+    //        Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMinZ});
+    //        octree_insert(chunk0, voxel);
+    //    }
 
-        // South wall (z = roomMaxZ) - WOOD
-        for (int x = roomMinX; x <= roomMaxX; ++x) {
-            //int index = x + y * WORLD_SIZE_X + roomMaxZ * WORLD_SIZE_X * WORLD_SIZE_Y;
-            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMaxZ});
-            octree_insert(chunk0, voxel);
-        }
+    //    // South wall (z = roomMaxZ) - WOOD
+    //    for (int x = roomMinX; x <= roomMaxX; ++x) {
+    //        //int index = x + y * WORLD_SIZE_X + roomMaxZ * WORLD_SIZE_X * WORLD_SIZE_Y;
+    //        Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {x, y, roomMaxZ});
+    //        octree_insert(chunk0, voxel);
+    //    }
 
-        // West wall (x = roomMinX) - WOOD
-        for (int z = roomMinZ; z <= roomMaxZ; ++z) {
-            //int index = roomMinX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {roomMinX, y, z});
-            octree_insert(chunk0, voxel);
-        }
+    //    // West wall (x = roomMinX) - WOOD
+    //    for (int z = roomMinZ; z <= roomMaxZ; ++z) {
+    //        //int index = roomMinX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+    //        Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(140, 90, 50, 255), {roomMinX, y, z});
+    //        octree_insert(chunk0, voxel);
+    //    }
 
-        // East wall (x = roomMaxX) - GLASS
-        for (int z = roomMinZ; z <= roomMaxZ; ++z) {
-            //int index = roomMaxX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
-            Voxel_Object voxel = VoxelObjCreate(voxels[VOX_GLASS], make_color_rgba(100, 100, 230, 40), {roomMaxX, y, z});
-            octree_insert(chunk0, voxel);
-        }
-    }
+    //    // East wall (x = roomMaxX) - GLASS
+    //    for (int z = roomMinZ; z <= roomMaxZ; ++z) {
+    //        //int index = roomMaxX + y * WORLD_SIZE_X + z * WORLD_SIZE_X * WORLD_SIZE_Y;
+    //        Voxel_Object voxel = VoxelObjCreate(voxels[VOX_GLASS], make_color_rgba(100, 100, 230, 40), {roomMaxX, y, z});
+    //        octree_insert(chunk0, voxel);
+    //    }
+    // }
 
-    // Create a red jelly sphere inside the room
-    int cx = (roomMinX + roomMaxX) / 2;
-    int cz = (roomMinZ + roomMaxZ) / 2;
-    int cy = floorY + 6;
-    int radius = 5;
+    // // Create a red jelly sphere inside the room
+    // int cx = (roomMinX + roomMaxX) / 2;
+    // int cz = (roomMinZ + roomMaxZ) / 2;
+    // int cy = floorY + 6;
+    // int radius = 5;
 
-    // Add a margin to ensure border voxels are included
-    // A voxel "touches" the sphere if any part of it intersects
-    // The farthest corner of a voxel from its center is sqrt(3)*0.5 ≈ 0.866
-    const float voxelMargin = 0.87f; // Slightly more than sqrt(3)/2
+    // // Add a margin to ensure border voxels are included
+    // // A voxel "touches" the sphere if any part of it intersects
+    // // The farthest corner of a voxel from its center is sqrt(3)*0.5 ≈ 0.866
+    // const float voxelMargin = 0.87f; // Slightly more than sqrt(3)/2
 
-    for (int x = cx - radius - 1; x <= cx + radius + 1; ++x) {
-        for (int y = cy - radius - 1; y <= cy + radius + 1; ++y) {
-            for (int z = cz - radius - 1; z <= cz + radius + 1; ++z) {
-                if (x < 0 || x >= WORLD_SIZE_X || y < 0 || y >= WORLD_SIZE_Y || z < 0 || z >= WORLD_SIZE_Z) continue;
-                
-                // Calculate distance from voxel center to sphere center
-                float dx = (float)(x - cx);
-                float dy = (float)(y - cy);
-                float dz = (float)(z - cz);
-                float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-                
-                // Include voxel if it intersects the sphere
-                // (distance from center to voxel center <= radius + margin)
-                if (dist <= (float)radius + voxelMargin) {
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_JELLY], 
-                        make_color_rgba(240, 100, 100, 100), {x, y, z});
-                    octree_insert(chunk0, voxel);
-                }
-            }
-        }
-    }
+    // for (int x = cx - radius - 1; x <= cx + radius + 1; ++x) {
+    //    for (int y = cy - radius - 1; y <= cy + radius + 1; ++y) {
+    //        for (int z = cz - radius - 1; z <= cz + radius + 1; ++z) {
+    //            if (x < 0 || x >= WORLD_SIZE_X || y < 0 || y >= WORLD_SIZE_Y || z < 0 || z >= WORLD_SIZE_Z) continue;
+               
+    //            // Calculate distance from voxel center to sphere center
+    //            float dx = (float)(x - cx);
+    //            float dy = (float)(y - cy);
+    //            float dz = (float)(z - cz);
+    //            float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+               
+    //            // Include voxel if it intersects the sphere
+    //            // (distance from center to voxel center <= radius + margin)
+    //            if (dist <= (float)radius + voxelMargin) {
+    //                Voxel_Object voxel = VoxelObjCreate(voxels[VOX_JELLY], 
+    //                    make_color_rgba(240, 100, 100, 100), {x, y, z});
+    //                octree_insert(chunk0, voxel);
+    //            }
+    //        }
+    //    }
+    // }
 
-    // --- Giant soccer ball outside the room ---
-    // Position the ball to the +X side of the room, but still inside world bounds.
-    int ball_cx = roomMaxX + 15;
-    int ball_cz = (roomMinZ + roomMaxZ) / 2 + 8;
-    int ball_cy = floorY + 8;
-    int ball_radius = 12;
+    // // --- Giant soccer ball outside the room ---
+    // // Position the ball to the +X side of the room, but still inside world bounds.
+    // int ball_cx = roomMaxX + 15;
+    // int ball_cz = (roomMinZ + roomMaxZ) / 2 + 8;
+    // int ball_cy = floorY + 8;
+    // int ball_radius = 12;
 
-    // Ensure the ball center is inside the world; clamp if necessary.
-    if (ball_cx < 0) ball_cx = 0;
-    if (ball_cx >= WORLD_SIZE_X) ball_cx = WORLD_SIZE_X - 1;
-    if (ball_cz < 0) ball_cz = 0;
-    if (ball_cz >= WORLD_SIZE_Z) ball_cz = WORLD_SIZE_Z - 1;
-    if (ball_cy < 0) ball_cy = 0;
-    if (ball_cy >= WORLD_SIZE_Y) ball_cy = WORLD_SIZE_Y - 1;
+    // // Ensure the ball center is inside the world; clamp if necessary.
+    // if (ball_cx < 0) ball_cx = 0;
+    // if (ball_cx >= WORLD_SIZE_X) ball_cx = WORLD_SIZE_X - 1;
+    // if (ball_cz < 0) ball_cz = 0;
+    // if (ball_cz >= WORLD_SIZE_Z) ball_cz = WORLD_SIZE_Z - 1;
+    // if (ball_cy < 0) ball_cy = 0;
+    // if (ball_cy >= WORLD_SIZE_Y) ball_cy = WORLD_SIZE_Y - 1;
 
-    // Use a spherical mapping pattern (latitude/longitude quantized) to approximate soccer patches.
-    const float PI = acosf(-1.0f);
-    const float patchAngle = PI / 3.0f; // controls patch size; tweak for different look
+    // // Use a spherical mapping pattern (latitude/longitude quantized) to approximate soccer patches.
+    // const float PI = acosf(-1.0f);
+    // const float patchAngle = PI / 3.0f; // controls patch size; tweak for different look
 
-    for (int x = ball_cx - ball_radius; x <= ball_cx + ball_radius; ++x) {
-        for (int y = ball_cy - ball_radius; y <= ball_cy + ball_radius; ++y) {
-            for (int z = ball_cz - ball_radius; z <= ball_cz + ball_radius; ++z) {
-                if (x < 0 || x >= WORLD_SIZE_X || y < 0 || y >= WORLD_SIZE_Y || z < 0 || z >= WORLD_SIZE_Z) continue;
-                int dx = x - ball_cx; int dy = y - ball_cy; int dz = z - ball_cz;
-                float dist2 = (float)(dx*dx + dy*dy + dz*dz);
-                if (dist2 > (float)(ball_radius*ball_radius)) continue; // outside sphere
+    // for (int x = ball_cx - ball_radius; x <= ball_cx + ball_radius; ++x) {
+    //    for (int y = ball_cy - ball_radius; y <= ball_cy + ball_radius; ++y) {
+    //        for (int z = ball_cz - ball_radius; z <= ball_cz + ball_radius; ++z) {
+    //            if (x < 0 || x >= WORLD_SIZE_X || y < 0 || y >= WORLD_SIZE_Y || z < 0 || z >= WORLD_SIZE_Z) continue;
+    //            int dx = x - ball_cx; int dy = y - ball_cy; int dz = z - ball_cz;
+    //            float dist2 = (float)(dx*dx + dy*dy + dz*dz);
+    //            if (dist2 > (float)(ball_radius*ball_radius)) continue; // outside sphere
 
-                float rlen = sqrtf(dist2);
-                // Avoid division by zero
-                if (rlen < 1e-6f) rlen = 1e-6f;
+    //            float rlen = sqrtf(dist2);
+    //            // Avoid division by zero
+    //            if (rlen < 1e-6f) rlen = 1e-6f;
 
-                // Spherical coords: theta in [0, 2PI), phi in [0, PI]
-                float theta = atan2f((float)dz, (float)dx) + PI; // [0, 2PI) 
-                float phi = acosf(((float)dy) / rlen); // [0, PI]
+    //            // Spherical coords: theta in [0, 2PI), phi in [0, PI]
+    //            float theta = atan2f((float)dz, (float)dx) + PI; // [0, 2PI) 
+    //            float phi = acosf(((float)dy) / rlen); // [0, PI]
 
-                int a = (int)floorf(theta / patchAngle);
-                int b = (int)floorf(phi / patchAngle);
+    //            int a = (int)floorf(theta / patchAngle);
+    //            int b = (int)floorf(phi / patchAngle);
 
-                // Checker of latitude/longitude cells gives a soccer-like patch pattern
-                bool whitePatch = ((a + b) & 1) == 0;
+    //            // Checker of latitude/longitude cells gives a soccer-like patch pattern
+    //            bool whitePatch = ((a + b) & 1) == 0;
 
-                if (whitePatch) {
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_STONE], make_color_rgba(240, 240, 240, 255), {x, y, z}); // white
-                    octree_insert(chunk0, voxel);
-                } else {
-                    Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(20, 20, 20, 255), {x, y, z}); // black
-                    octree_insert(chunk0, voxel);
-                }
-            }
-        }
-    }
+    //            if (whitePatch) {
+    //                Voxel_Object voxel = VoxelObjCreate(voxels[VOX_STONE], make_color_rgba(240, 240, 240, 255), {x, y, z}); // white
+    //                octree_insert(chunk0, voxel);
+    //            } else {
+    //                Voxel_Object voxel = VoxelObjCreate(voxels[VOX_WOOD], make_color_rgba(20, 20, 20, 255), {x, y, z}); // black
+    //                octree_insert(chunk0, voxel);
+    //            }
+    //        }
+    //    }
+    // }
 
     float voxelScale = 1.0; // A escala do voxel no mundo, ex: 2.0 significa 1 voxel a cada 0.5 unidades de espaço
 
@@ -632,6 +718,10 @@ int main(void)
     glm::vec3 lastCameraPos = camera.Position;
     glm::vec3 lastCameraDir = camera.Front;
 
+    int badAppleCounter = 0;
+    float videoTimer = 0.0f; 
+    float videoInterval = 1.0f / 30.0f;
+
     // Dentro do seu game loop
     while (!glfwWindowShouldClose(window)) {
         now = (float)glfwGetTime();
@@ -646,40 +736,67 @@ int main(void)
         // Processar input do teclado
         processInput(window);
 
-        // 2. PHYSICS UPDATE (The loop I designed)
-        // Apply friction
-        float damping = isGrounded ? FRICTION : AIR_RESISTANCE;
-        playerVelocity.x -= playerVelocity.x * damping * deltaTime;
-        playerVelocity.z -= playerVelocity.z * damping * deltaTime;
-        
-        // Apply Gravity
-        playerVelocity.y -= GRAVITY * deltaTime;
-
+        // 2. PHYSICS UPDATE
         // Current position (Feet)
         glm::vec3 feetPos = camera.Position;
         feetPos.y -= EYE_LEVEL;
 
-        // Move & Collide X
         feetPos.x += playerVelocity.x * deltaTime;
-        if (checkCollision(chunk0, feetPos)) {
-            feetPos.x -= playerVelocity.x * deltaTime;
-            playerVelocity.x = 0;
-        }
-
-        // Move & Collide Z
         feetPos.z += playerVelocity.z * deltaTime;
-        if (checkCollision(chunk0, feetPos)) {
-            feetPos.z -= playerVelocity.z * deltaTime;
-            playerVelocity.z = 0;
-        }
-
-        // Move & Collide Y
         feetPos.y += playerVelocity.y * deltaTime;
-        isGrounded = false;
-        if (checkCollision(chunk0, feetPos)) {
-            if (playerVelocity.y < 0) isGrounded = true;
-            feetPos.y -= playerVelocity.y * deltaTime;
-            playerVelocity.y = 0;
+
+        // BAD APPLE
+        // videoTimer += deltaTime;
+        // if (videoTimer >= videoInterval) {
+        //     videoTimer = 0.0f;
+
+        //     // 1. Delete old tree
+        //     if (chunk0) octree_delete(chunk0);
+
+        //     // 2. Create new tree
+        //     chunk0 = octree_create(NULL, 
+        //         {-WORLD_SIZE_X + 1, -WORLD_SIZE_Y + 1, -WORLD_SIZE_Z + 1}, 
+        //         {WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z}
+        //     );
+
+        //     // 3. Load Frame
+        //     ReadBadAppleFrame(chunk0, badAppleCounter);
+        //     badAppleCounter++;
+
+        //     // 4. Update GPU
+        //     // Note: This is heavy! Expect low FPS with RGBA32UI upload every frame.
+        //     // Ensure you unbound the texture before calling this in updateGPUTexture
+        //     updateGPUTexture(chunk0);
+        // }
+
+        if(!CREATIVE){
+            // Apply friction
+            float damping = isGrounded ? FRICTION : AIR_RESISTANCE;
+            playerVelocity.x -= playerVelocity.x * damping * deltaTime;
+            playerVelocity.z -= playerVelocity.z * damping * deltaTime;
+            
+            // Apply Gravity
+            playerVelocity.y -= GRAVITY * deltaTime;
+
+            // Move & Collide X
+            if (checkCollision(chunk0, feetPos)) {
+                feetPos.x -= playerVelocity.x * deltaTime;
+                playerVelocity.x = 0;
+            }
+
+            // Move & Collide Z
+            if (checkCollision(chunk0, feetPos)) {
+                feetPos.z -= playerVelocity.z * deltaTime;
+                playerVelocity.z = 0;
+            }
+
+            // Move & Collide Y
+            isGrounded = false;
+            if (checkCollision(chunk0, feetPos)) {
+                if (playerVelocity.y < 0) isGrounded = true;
+                feetPos.y -= playerVelocity.y * deltaTime;
+                playerVelocity.y = 0;
+            }
         }
 
         // Update Camera
@@ -699,11 +816,13 @@ int main(void)
         static glm::ivec3 highlightedVoxel(-1);
         static bool leftWasDown = false;
         static bool rightWasDown = false;
+        static bool middleWasDown = false;
+        static bool cWasDown = false;
 
         // 1. Raycast to find what we are looking at
         
         Ray ray;
-        ray.origin = {camera.Position.x, camera.Position.y, camera.Position.z};
+        ray.origin = vec3_scalar_mul({camera.Position.x, camera.Position.y, camera.Position.z}, voxelScale);
         ray.direction = {camera.Front.x, camera.Front.y, camera.Front.z};
         Octree* hitNode = octree_ray_cast(chunk0, ray, {0,0,0}, {(float)WORLD_SIZE_X, (float)WORLD_SIZE_Y, (float)WORLD_SIZE_Z});
 
@@ -759,6 +878,26 @@ int main(void)
             }
         }
         rightWasDown = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS);
+
+        // MIDDLE CLICK: CHANGE MATERIAL - WOOD TO LIGHT
+        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS && !middleWasDown) {
+            switch (selectedMaterialIndex)
+            {
+            case 2:
+                selectedMaterialIndex = 10;
+                break;
+            case 10:
+                selectedMaterialIndex = 2;
+                break;
+            }
+        }
+        middleWasDown = (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS);
+
+        // MIDDLE CLICK: CHANGE MATERIAL - WOOD TO LIGHT
+        if (glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS && !cWasDown) {
+            CREATIVE = !CREATIVE;
+        }
+        cWasDown = (glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS);
 
         // 3. Update GPU if dirty
         if (worldDirty) {

@@ -1,13 +1,15 @@
 #version 450 core
- 
-#define LEAF_FLAG 255u 
-#define INTERNAL_NODE_FLAG 0u
 
 // A dimensão da sua folha em texels (baseado no seu C++)
-#define LEAF_SIZE 3
+#define LEAF_SIZE 2
 
 const int MAX_RAYS = 8;
+const int INDIRECT_SAMPLES = 1;
+const int BOUNCES = 1;
+const float PI = 3.14159265359;
+
 const vec4 skyColor = vec4(0.5, 0.7, 1.0, 1.0);
+const float sunIntensity = 3.0;
 
 layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout (rgba8, binding = 0) uniform writeonly image2D destTex;
@@ -84,9 +86,13 @@ ivec3 fromLinear(int index) {
 
 // Converte um "ponteiro" (cor RGB 0.0-1.0) de volta para 
 // uma coordenada inteira de texel (ex: [0, 255])
-ivec3 decodePointer(uvec3 pointer_rgb) {
+uvec2 decodePointer(uvec3 pointer_rgb) {
     // Os valores já são os inteiros corretos (0-255)
-    return ivec3(pointer_rgb);
+    uint val = pointer_rgb.r | (pointer_rgb.g << 8) | (pointer_rgb.b << 16);
+    uint isLeafBlock = (val & 0x800000u) != 0u ? 1u : 0u;
+    uint address = val & 0x7FFFFFu; // Remove flag bit 23
+
+    return uvec2(address, isLeafBlock);
 }
 
 // Determina em qual filho (0-7) o voxel do mundo está
@@ -109,6 +115,10 @@ void getChildBounds(int childIndices, inout ivec3 nodeMin, inout ivec3 nodeMax) 
 
     nodeMin.z = ((childIndices & 1) != 0) ? mid.z : nodeMin.z;
     nodeMax.z = ((childIndices & 1) != 0) ? nodeMax.z : mid.z;
+}
+
+bool hasChild(uint mask, int childIdx) {
+    return ((mask >> childIdx) & 1u) != 0u;
 }
 
 // Converte os dados de propriedade (armazenados como 0-255) de volta
@@ -145,13 +155,15 @@ VoxelData octreeFind(ivec3 worldPos, inout ivec3 minBound, inout ivec3 maxBound,
     data.nodeCoord = currentNodeCoord * mask; // (x * 1) ou (x * 0)
     data.nodeMin = (minBound * mask) + (u_worldBoundsMin * invMask);
     data.nodeMax = (maxBound * mask) + (u_worldBoundsMax * invMask);
+
+    bool isLeaf = false;
     
     for (int i = 0; i < 16; i++) {
         // LEITURA DIRETA DE INTEIROS
-        uvec4 nodeData = getNodeData(data.nodeCoord); 
+        uvec4 nodeData = getNodeData(data.nodeCoord);
 
         // Comparação direta de inteiros (>= 255u)
-        if (nodeData.a >= LEAF_FLAG) {            
+        if (isLeaf) {            
             int linearIndex = toLinear(data.nodeCoord);
 
             // Lê Propriedades
@@ -166,29 +178,36 @@ VoxelData octreeFind(ivec3 worldPos, inout ivec3 minBound, inout ivec3 maxBound,
             data.properties = decodeProperties(propDataFloat);
             return data;
         }
-
-        // Nó Interno
-        if (nodeData.a <= INTERNAL_NODE_FLAG) {
+        else { // Nó interno
             // Pega ponteiro direto (sem conversão de cor)
-            ivec3 pointerBlockBaseCoord = decodePointer(nodeData.rgb);
-            ivec3 midPoint = data.nodeMin + ((data.nodeMax - data.nodeMin) >> 1);
+            uvec2 pointerBlockBaseCoord = decodePointer(nodeData.rgb);
+            ivec3 midPoint = data.nodeMin + ((data.nodeMax - data.nodeMin) / 2);
             int childIndices = getchildIndices(worldPos, midPoint);
+
+            uint bitmask = uint(nodeData.a);
+
+            // Verifica existência do filho
+            bool childExists = hasChild(bitmask, childIndices);
+
+            // Calcula endereço do filho
+            uint beforeMask = bitmask & ((1u << uint(childIndices)) - 1u);
+            uint offset = bitCount(beforeMask);
             
-            int linearBaseIndex = toLinear(pointerBlockBaseCoord);
-            ivec3 childPointerCoord = fromLinear(linearBaseIndex + childIndices);
+            ivec3 childPointerCoord = fromLinear(int(pointerBlockBaseCoord.x + offset));
             
             uvec4 childPointerData = getNodeData(childPointerCoord);
-            ivec3 nextNode = decodePointer(childPointerData.rgb);
+            uvec2 nextNode = decodePointer(childPointerData.rgb);
+            isLeaf = (nextNode.y == 1u) ? true : false;
 
             // Guarda as informações do nó pai
             currentNodeCoord = data.nodeCoord;
             minBound = data.nodeMin;
             maxBound = data.nodeMax;
 
-            data.nodeCoord = nextNode;
+            data.nodeCoord = fromLinear(int(nextNode.x));
             getChildBounds(childIndices, data.nodeMin, data.nodeMax);
 
-            if (all(equal(nextNode, ivec3(0)))) {
+            if (!childExists) {
                 data.color = vec4(0.0); // Mark as empty
                 return data;
             }
@@ -217,7 +236,6 @@ vec4 accumulateColors(Ray rays[MAX_RAYS], int rayCount) {
     vec3 result = vec3(0.0);
     float totalWeight = 0.0;
     
-    // OTIMIZADO: Loop unrolling manual para MAX_RAYS=8
     for(int i = 0; i < rayCount; ++i){
         if (rays[i].defined){
             result += rays[i].colorTint.rgb * rays[i].weight;
@@ -312,7 +330,7 @@ bool hitMarching(vec3 rayOrigin, vec3 rayDir, float rayIOF, out ivec3 hitMapPos,
 }
 
 // Simplified raymarch just for occlusion
-bool inShadow(vec3 origin, vec3 lightDir) {
+int notInShadow(vec3 origin, vec3 lightDir) {
     vec3 rayPos = origin;
 
     const float DIR_EPSILON = 1e-8;
@@ -334,7 +352,7 @@ bool inShadow(vec3 origin, vec3 lightDir) {
     for (int i = 0; i < 64; ++i) {
         vox = octreeFind(mapPos, nodeMin, nodeMax, currentNodeCoord);
         
-        if (vox.color.a > 0.1) return true;
+        if (vox.color.a > 0.1 && vox.properties[1] == 0) return 0;
 
         vec3 boxMin = vec3(vox.nodeMin);
         vec3 boxMax = vec3(vox.nodeMax);
@@ -353,17 +371,17 @@ bool inShadow(vec3 origin, vec3 lightDir) {
         rayPos[axis] += sign(lightDir[axis]) * EPS;
         mapPos = ivec3(floor(rayPos));
 
-        if (!isInsideWorld(mapPos)) return false;
+        if (!isInsideWorld(mapPos)) return 1;
     }
-    return false;
+    return 1;
 }
 
 uint rngState;
 
 void initRNG(ivec2 pixelCoord, int sampleIndex) {
     // Better seed mixing for stratified samples
-    uint seed = uint(pixelCoord.x) + uint(pixelCoord.y) * 1920u + 
-                uint(0) * 123456u + uint(sampleIndex) * 78901u;
+    uint seed = uint(pixelCoord.x) + uint(pixelCoord.y) * 1920u 
+                + 123456u + uint(sampleIndex) * 78901u;
     rngState = seed * 747796405u + 2891336453u;
     uint word = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
     rngState = (word >> 22u) ^ word;
@@ -380,31 +398,21 @@ vec2 rand2() {
     return vec2(rand(), rand()); 
 }
 
-// ===== STRATIFIED SAMPLING =====
-// Divides pixel into grid for better coverage
-vec2 stratifiedSample(int sampleIndex, int totalSamples) {
-    int sqrtSamples = int(ceil(sqrt(float(totalSamples))));
-    int x = sampleIndex % sqrtSamples;
-    int y = sampleIndex / sqrtSamples;
-    
-    vec2 jitter = rand2();
-    vec2 stratified = (vec2(x, y) + jitter) / float(sqrtSamples);
-    return stratified;
-}
+// Função para obter uma direção aleatória num hemisfério de acordo com Monte Carlo
+vec3 cosineSampleHemisphere(vec3 normal, vec2 r) {
+    float phi = 2.0 * PI * r.y;
+    float cosTheta = sqrt(r.x);
+    float sinTheta = sqrt(1.0 - r.x);
 
-// ===== IMPORTANCE SAMPLING =====
-vec3 cosineSampleHemisphere(vec3 normal) {
-    vec2 r = rand2();
-    float phi = 2.0 * 3.14159265359 * r.x;
-    float cosTheta = sqrt(r.y);
-    float sinTheta = sqrt(1.0 - r.y);
+    float x = sinTheta * cos(phi);
+    float z = sinTheta * sin(phi);
     
     vec3 up = abs(normal.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
     vec3 tangent = normalize(cross(up, normal));
     vec3 bitangent = cross(normal, tangent);
     
-    return normalize(tangent * (sinTheta * cos(phi)) + 
-                     bitangent * (sinTheta * sin(phi)) + 
+    return normalize(tangent * x + 
+                     bitangent * z + 
                      normal * cosTheta);
 }
 
@@ -429,7 +437,7 @@ vec4 pathTrace(vec3 rayOrigin, vec3 rayDir, inout int primaryVoxelID, inout int 
     ivec3 nodeMin = u_worldBoundsMin;
     ivec3 nodeMax = u_worldBoundsMax;
 
-    primaryVoxelID = -1;
+    primaryVoxelID = 0;
     pixelDist = worldSize.x;
 
     vec3 gridRayOrigin = rayOrigin * u_voxelScale;
@@ -469,42 +477,38 @@ vec4 pathTrace(vec3 rayOrigin, vec3 rayDir, inout int primaryVoxelID, inout int 
         bool hit = hitMarching(currentRay.origin, currentRay.direction, currentRay.IOF,
                               mapPos, hitPoint, hitNormal, lastVoxel, hitVoxel);
 
-        if (!hit) {
-            // Apply Beer's Law and add to results
-            vec4 transmittedColor = currentRay.colorTint;
+        vec4 transmittedColor = currentRay.colorTint;
+        if (!hit && currentRay.depth <= 0) {
             if (currentRay.distanceInMedium > 1e-6 && currentRay.mediumDensity > 0.0) {
                 vec3 absorption = exp(-currentRay.mediumDensity * currentRay.distanceInMedium * 
                                       (vec3(1.0) - currentRay.mediumColor.rgb));
                 transmittedColor.rgb *= absorption;
             }
 
-            finalColor += transmittedColor.rgb * currentRay.weight;
+            // Add sky contribution scaled by global light
+            finalColor += globalLight.rgb * skyColor.rgb * transmittedColor.rgb * currentRay.weight;
+            continue;
+        }
+        else if(!hit){
+            finalColor += transmittedColor.rgb * skyColor.rgb * sunIntensity * currentRay.weight / PI;
             continue;
         }
 
         vec3 normal = length(hitNormal) > 0.0 ? hitNormal : vec3(0.0, 1.0, 0.0);
-
         vec3 hitPointWorld = hitPoint / u_voxelScale;
-        // Adiciona metade do tamanho na direção da normal para chegar ao centro da FACE
         vec3 faceCenterGrid = vec3(mapPos) + normal;
 
-        // Update distance traveled through current medium
         currentRay.distanceInMedium += length(hitPointWorld - currentRay.origin) / u_voxelScale;
         
         if (hitVoxel.color.a <= 0.0) hitVoxel.properties = vec3(1.0, 0.0, 0.0);
         if (lastVoxel.color.a <= 0.0) lastVoxel.properties = currentRay.IOF > 0.0 ? vec3(0.0) : vec3(1.0, 0.0, 0.0);
 
-        vec3 finalLight = vec3(max(dot(normal, lightDir), 0.0));
-        
-        // Determine surface color based on which side we're hitting
         vec4 surfaceColor = hitVoxel.color.a > 0.0 ? hitVoxel.color : lastVoxel.color;
         float n2 = hitVoxel.properties[0] > 0.0 ? hitVoxel.properties[0] : 1.0;
         float n1 = lastVoxel.properties[0] > 0.0 ? lastVoxel.properties[0] : 1.0;
 
         vec3 incidentDir = currentRay.direction;
 
-        // Apply Beer's Law
-        vec4 transmittedColor = currentRay.colorTint;
         if (currentRay.distanceInMedium > 1e-6 && currentRay.mediumDensity > 0.0) {
             vec3 absorption = exp(-currentRay.mediumDensity * currentRay.distanceInMedium * 
                                   (vec3(1.0) - currentRay.mediumColor.rgb));
@@ -515,7 +519,6 @@ vec4 pathTrace(vec3 rayOrigin, vec3 rayDir, inout int primaryVoxelID, inout int 
             surfaceColor = vec4(vec3(1.0) - surfaceColor.rgb, 1.0);
         } 
 
-        // === TRANSPARENT/TRANSLUCENT SURFACES ===
         float cosi = dot(incidentDir, normal);
         if (cosi > 0.0) {
             normal = -normal;
@@ -523,7 +526,6 @@ vec4 pathTrace(vec3 rayOrigin, vec3 rayDir, inout int primaryVoxelID, inout int 
         }
 
         vec3 refractDir = refract(incidentDir, normal, n1 / n2);
-
         float R0 = (n1 - n2) / (n1 + n2) * (n1 - n2) / (n1 + n2);
         float cosTheta = max(0.0, dot(-incidentDir, normal));
         float fresnel = clamp(R0 + (1.0 - R0) * pow(1.0 - cosTheta, 5.0), 0.0, 1.0);
@@ -532,36 +534,34 @@ vec4 pathTrace(vec3 rayOrigin, vec3 rayDir, inout int primaryVoxelID, inout int 
         float reflectIntensity = fresnel;
         float refractIntensity = hasTIR ? 0.0 : (1.0 - fresnel);
 
-        if (currentRay.depth == 0 && primaryVoxelID == -1 && surfaceColor.a >= 1) {
+        float ndotl = max(dot(normal, lightDir), 0.0); // Fator de iluminação direta
+
+        if (currentRay.depth == 0 && primaryVoxelID == 0 && surfaceColor.a >= 1) {
             int voxelIndex = toLinear(mapPos);
             int faceIndex = getFaceIndex(hitNormal);
-            
-            // Cria um ID único para ESTA FACE deste voxel específico.
-            // Multiplicamos por 6 para "abrir espaço" para as 6 faces possíveis.
             primaryVoxelID = (voxelIndex * 6) + faceIndex;
             pixelDist = int(length(hitPointWorld - rayOrigin));
         }
 
+        // === TRANSPARENT/TRANSLUCENT ===
         if (currentRay.depth <= 0 && surfaceColor.a < 1) {
-            // DONT WASTE ENERGY YOU SICK FUCK
             if(stackSize == MAX_RAYS || reflectIntensity <= 0.001 || refractIntensity <= 0.001){
-                vec4 litSurfaceColor = vec4(surfaceColor.rgb * finalLight, 1.0);
+                vec3 directLight = globalLight.rgb * ndotl;
+                vec4 litSurfaceColor = vec4(surfaceColor.rgb * directLight, 1.0);
                 finalColor += transmittedColor.rgb * litSurfaceColor.rgb * currentRay.weight;
                 continue;
             }
 
-            // ---- Reflection ray ----
             if (reflectIntensity > 0.001 && stackSize < MAX_RAYS) {
                 float reflectWeight = currentRay.weight * reflectIntensity;
                 if (reflectWeight > 1e-4)
                     rayStack[stackSize++] = Ray(
                         hitPoint + normal * 1e-4, reflect(incidentDir, normal), n1,
                         reflectWeight, true,
-                        transmittedColor, 0.0, lastVoxel.color, lastVoxel.color.a * 5.0, currentRay.depth
+                        transmittedColor, currentRay.distanceInMedium, lastVoxel.color, lastVoxel.color.a * 5.0, currentRay.depth
                     );
             }
 
-            // ---- Refraction ray ----
             if (refractIntensity > 0.001 && stackSize < MAX_RAYS && !hasTIR) {
                 rayStack[stackSize++] = Ray(
                     hitPoint - normal * 1e-4, refractDir, n2,
@@ -571,100 +571,50 @@ vec4 pathTrace(vec3 rayOrigin, vec3 rayDir, inout int primaryVoxelID, inout int 
             }
         }
         else {
-            // === PATH TRACING: SUPERFÍCIE OPACA ===
-            
-            // 1. Iluminação Direta (Next Event Estimation)
-            // Calculamos a luz do sol AGORA e somamos ao resultado final.
-            float ndotl = max(dot(normal, lightDir), 0.0);
-            
-            // Sombra (Raytrace real)
-            // Nota: Use um shadowRay simples aqui se tiver, ou sua função inShadow
-            float shadowFactor = 1.0;
-            if (ndotl > 0.0) {
-                 // Pequeno bias (1e-3) para evitar "acne" de sombra
-                 bool isInShadow = inShadow(hitPoint + normal * 2e-3, lightDir); 
-                 shadowFactor = isInShadow ? 0.0 : 1.0;
+            // 1. Calculate Emission (If the object glows, add it now)
+            float emissionStrength = hitVoxel.properties[1] * 10.0;
+            if (emissionStrength > 0.0 && currentRay.depth == 0) {
+                finalColor += transmittedColor.rgb * surfaceColor.rgb * emissionStrength * currentRay.weight;
+                continue;
+            }else if(emissionStrength > 0.0){
+                finalColor += transmittedColor.rgb * surfaceColor.rgb * emissionStrength * currentRay.weight / PI;
+                continue;
             }
 
-            vec3 directLight = globalLight.rgb * ndotl * shadowFactor;
+            // 2. Direct Lighting (Next Event Estimation) - Keep this if you separate direct/indirect
+            if (currentRay.depth == 0) {
+                // Calculate direct lighting normally
+                vec3 directLight = globalLight.rgb * notInShadow(hitPoint + normal * 2e-3, lightDir) * ndotl;
+                finalColor += directLight * surfaceColor.rgb * transmittedColor.rgb * currentRay.weight / PI;
+            }
+            else{
+                float ambientCoefficient = max(1.0 - exp(-currentRay.distanceInMedium / 512.0), 0.01);
+                finalColor += ambientCoefficient * surfaceColor.rgb * transmittedColor.rgb * currentRay.weight / PI;
+                continue;
+            }
 
-            // A MÁGICA: Somamos a luz direta ponderada pela "tinta" (throughput) que o raio carrega
-            // Se este é o primeiro raio, weight é 1.0. Se é o segundo, weight é a cor da parede anterior.
-            vec3 lightingContribution = directLight * surfaceColor.rgb * transmittedColor.rgb * currentRay.weight;
-            finalColor += lightingContribution;
+            // 3. Indirect Lighting (Bounces)
+            for(int i = 0; i < INDIRECT_SAMPLES && stackSize < MAX_RAYS && currentRay.depth <= BOUNCES; ++i){
+                vec2 r = rand2();
+                vec3 bounceDir = cosineSampleHemisphere(normal, r);
+                
+                // We divide by INDIRECT_SAMPLES to average the Monte Carlo split
+                float newWeight = currentRay.weight / float(INDIRECT_SAMPLES);
 
-            // 2. Iluminação Indireta (O Rebote)
-            // O que sobrou da luz (que não foi absorvida) continua viajando
-            
-            // Probabilidade de reflexão especular vs difusa (Fresnel simplificado)
-            float specularProb = hitVoxel.properties[2]; // Metallicity ou Specular
-
-            // Russian Roulette
-            float russianRoulette = max(max(surfaceColor.r, surfaceColor.g), surfaceColor.b) * currentRay.weight;
-            if (currentRay.depth >= 2 || russianRoulette < 0.1) {
-                if (rand() > russianRoulette) continue;
+                rayStack[stackSize++] = Ray(
+                    hitPoint + normal * 1e-1, 
+                    bounceDir,
+                    n1,
+                    newWeight, // The new corrected throughput
+                    true,
+                    transmittedColor * surfaceColor, 
+                    0.0, 
+                    lastVoxel.color,
+                    lastVoxel.color.a * 5.0, 
+                    currentRay.depth + 1
+                );
             }
             
-            // Russian Roulette: Mata o raio se ele estiver muito fraco para economizar performance
-            // Aumenta a chance de morrer conforme o 'weight' diminui
-            if (currentRay.depth < 3 && stackSize < MAX_RAYS) { // Limite de 3 batidas
-                vec3 bounceDir;
-                float newWeight = currentRay.weight;
-                // Reflexão Difusa (Espalha luz em todas as direções)
-                // Usa amostragem cosseno para convergir mais rápido sem ruído
-                // Decide se é especular ou difuso baseado em probabilidade
-                bool isSpecular = (rand() < specularProb); 
-
-                if (isSpecular) {
-                    // Reflexão Perfeita (Espelho)
-                    bounceDir = reflect(incidentDir, normal);
-                } else {
-                    // Reflexão Difusa (Espalha luz em todas as direções)
-                    // Usa amostragem cosseno para convergir mais rápido sem ruído
-                    bounceDir = cosineSampleHemisphere(normal);
-                }
-
-                vec3 brdfFactor = vec3(0.0);
-                float pdf = 1.0;
-
-                if (isSpecular) {
-                    // sample perfect reflection (delta): mirror
-                    bounceDir = reflect(incidentDir, normal);
-                    // throughput multiply by Fresnel (energy kept in delta)
-                    brdfFactor = vec3(1.0) * reflectIntensity; // reflectance
-                    pdf = 1.0; // delta PDF treated as 1 for our discrete branch
-                } else {
-                    // sample diffuse lobe (cosine-weighted)
-                    bounceDir = cosineSampleHemisphere(normal);
-                    // Lambertian BRDF = albedo / pi
-                    brdfFactor = surfaceColor.rgb / 3.14159265;
-                    // pdf for cosine hemisphere = cos(theta) / pi
-                    float cosNew = max(dot(bounceDir, normal), 0.0);
-                    pdf = cosNew / 3.14159265 + 1e-7;
-                }
-
-                // ATUALIZA A TINTA (THROUGHPUT)
-                // Importante: Multiplicamos apenas pela COR DO VOXEL (Albedo), não pela luz.
-                // O 'transmittedColor' é a tinta que o raio já trazia (ex: passou por vidro colorido)
-                float cosTerm = max(dot(bounceDir, normal), 0.0);
-                vec3 factor = brdfFactor * cosTerm / pdf;
-                vec4 nextTint = transmittedColor * vec4(factor, 1.0);
-
-                // Empilha o novo raio
-                Ray bounceRay;
-                bounceRay.origin = hitPoint + normal * 0.002; // Bias para não bater no próprio voxel
-                bounceRay.direction = bounceDir;
-                bounceRay.IOF = n1; // Mantém o índice de refração do meio atual
-                bounceRay.weight = newWeight; // Mantém o peso (energia)
-                bounceRay.defined = true;
-                bounceRay.colorTint = nextTint; // A nova cor filtro
-                bounceRay.distanceInMedium = 0.0;
-                bounceRay.mediumColor = vec4(0.0);
-                bounceRay.mediumDensity = 0.0;
-                bounceRay.depth = currentRay.depth + 1; // Aumenta a contagem de bounces
-
-                addRay(rayStack, bounceRay, stackSize);
-            }
         }
     }
     

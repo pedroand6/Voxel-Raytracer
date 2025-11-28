@@ -10,10 +10,10 @@ extern "C" {
 #include <math.h>
 #include <stdio.h> // Certifique-se de que stdio.h está incluído
 #ifndef MIN_HEIGHT
-#define MIN_HEIGHT -256
+#define MIN_HEIGHT -1024
 #endif
 #ifndef MAX_HEIGHT
-#define MAX_HEIGHT 256
+#define MAX_HEIGHT 1024
 #endif
 
 #define CELL_COUNT (MAX_HEIGHT - MIN_HEIGHT)
@@ -484,36 +484,89 @@ Octree* octree_ray_cast(Octree *root, Ray ray, Vector3 worldMin, Vector3 worldMa
     return NULL;
 }
 
+// Retorna a máscara de filhos válidos (8 bits)
+uint8_t _get_child_mask(Octree *node) {
+    if (!node || !node->children) return 0;
+    uint8_t mask = 0;
+    for (int i = 0; i < 8; i++) {
+        // Um filho existe se não for NULL e (tiver voxel OU tiver netos)
+        if (node->children[i] && (node->children[i]->has_voxel || node->children[i]->children)) {
+            mask |= (1 << i);
+        }
+    }
+    return mask;
+}
+
+// Ajuda a decidir se o bloco de filhos deve ser tratado como folhas (stride largo)
+bool _block_contains_leaves(Octree *node) {
+    if (!node || !node->children) return false;
+    for (int i = 0; i < 8; i++) {
+        // Se existe algum filho que NÃO tem filhos (é folha e tem voxel), o bloco todo vira bloco de folhas
+        if (node->children[i] && node->children[i]->children == NULL && node->children[i]->has_voxel) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int _count_set_bits(uint8_t n) {
+    int count = 0;
+    while (n > 0) {
+        n &= (n - 1);
+        count++;
+    }
+    return count;
+}
+
+// --- FIXED: Octree Texel Size ---
+// Calculates exact size: 
+// 1 texel (Header) + N texels (Pointers) + Recursive Children
 size_t _octree_texel_size(Octree *tree) {
     if(!tree) return 0;
     
-    // CRITICAL FIX: Empty leaf nodes don't take space in texture
+    // CASO BASE: Folha com dados (2 texels)
     if(!tree->children) {
         return tree->has_voxel ? LEAF_SIZE : 0;
     }
     
-    size_t total = 1 + 8; // Parent node + pointer block
+    // CASO NÓ INTERNO:
+    uint8_t mask = _get_child_mask(tree);
+    if (mask == 0) return 0; // Se não tem filhos válidos, tamanho é 0
     
+    // 1. Header do próprio nó
+    size_t total = 1; 
+    
+    // 2. Ponteiros para os filhos (Packed/Espremidos)
+    // Se a máscara for 00000101, temos 2 filhos, logo 2 texels de ponteiro.
+    total += _count_set_bits(mask);
+
+    // 3. Tamanho recursivo dos filhos
     for(int i = 0; i < CHILDREN_COUNT; i++) {
-        total += _octree_texel_size(tree->children[i]);
+        // Verifica se o bit 'i' está setado
+        if ((mask >> i) & 1) {
+            total += _octree_texel_size(tree->children[i]);
+        }
     }
+    
     return total;
 }
 
-void _encode_pointer(int block_index, uint8_t *out_voxel, size_t tex_dim) {
-    // (Assumindo que ColorRGBA é 4 bytes)
-    // Precisamos de (x,y,z) *por texel*, não por byte.
-    // O ponteiro de entrada out_voxel já deve estar na base correta (ex: &texture[base])
+// Codifica um índice linear de até 16 Milhões (24 bits) nos canais R, G, B
+// Usa o bit mais significativo (Bit 23 do Blue) como flag "IS_LEAF_BLOCK"
+void _encode_pointer(size_t linear_index, bool is_leaf_block, uint8_t *out_voxel) {
+    // Garante que o índice cabe em 23 bits (Max ~8.3 milhões de texels)
+    // Se precisar de mais, use texturas maiores ou lógica RGBA32UI
+    uint32_t val = (uint32_t)linear_index;
     
-    size_t tex_dim_sq = tex_dim * tex_dim;
-    int z = block_index / (tex_dim_sq);
-    int y = (block_index / tex_dim) % tex_dim;
-    int x = block_index % tex_dim;
+    // Se for bloco de folhas, liga o bit 23 (Top bit do 3º byte)
+    if (is_leaf_block) {
+        val |= 0x800000; // Seta o bit 23
+    }
 
-    out_voxel[0] = (uint8_t)x;
-    out_voxel[1] = (uint8_t)y;
-    out_voxel[2] = (uint8_t)z;
-    out_voxel[3] = 0; //Flag for internal node
+    out_voxel[0] = (uint8_t)(val & 0xFF);        // R (Low)
+    out_voxel[1] = (uint8_t)((val >> 8) & 0xFF); // G (Mid)
+    out_voxel[2] = (uint8_t)((val >> 16) & 0xFF);// B (High + Flag)
+    // O Alpha (out_voxel[3]) é controlado pela função principal (Máscara ou Flag)
 }
 
 // Esta função usa a lógica SVO correta (nó pai -> bloco de 8 ponteiros -> filhos)
@@ -522,60 +575,81 @@ void _transform_node_to_texture(Octree *node,
                                 size_t *next_free_block, 
                                 size_t tex_dim) 
 {
-    size_t base = *next_free_block * 4;
-    
-    if (node->children == NULL) {
-        // CRITICAL FIX: Only write leaf data if voxel exists
-        if (!node->has_voxel) {
-            return; // Empty node, don't write anything
-        }
-        
-        // TEXEL 0: Color + Leaf Flag
-        texture[base + 0] = get_red_rgba(node->voxel.color);
-        texture[base + 1] = get_green_rgba(node->voxel.color);
-        texture[base + 2] = get_blue_rgba(node->voxel.color);
-        texture[base + 3] = 255;
-        
-        // TEXEL 1: Properties + Alpha
-        texture[base + 4] = (uint8_t)(node->voxel.voxel.refraction * (255.0 / 3.0));
-        texture[base + 5] = (uint8_t)(node->voxel.voxel.illumination * 255.0);
-        texture[base + 6] = (uint8_t)(node->voxel.voxel.k * 255.0);
-        texture[base + 7] = get_alpha_rgba(node->voxel.color);
+    if (!node) return;
 
-        *next_free_block += LEAF_SIZE;
+    // --- A. SOU FOLHA? (Escreve Dados) ---
+    if (node->children == NULL) {
+        if (!node->has_voxel) return;
+
+        size_t base_byte = (*next_free_block) * 4;
+        
+        // Texel 1: Cor + Marker
+        texture[base_byte + 0] = get_red_rgba(node->voxel.color);
+        texture[base_byte + 1] = get_green_rgba(node->voxel.color);
+        texture[base_byte + 2] = get_blue_rgba(node->voxel.color);
+        texture[base_byte + 3] = 255; // Marcador: Sou dados de folha
+        
+        // Texel 2: Propriedades Físicas
+        texture[base_byte + 4] = (uint8_t)(node->voxel.voxel.refraction * 85.0f); // Scale correction
+        texture[base_byte + 5] = (uint8_t)(node->voxel.voxel.illumination * 255.0f);
+        texture[base_byte + 6] = (uint8_t)(node->voxel.voxel.k * 255.0f);
+        texture[base_byte + 7] = get_alpha_rgba(node->voxel.color);
+        
+        (*next_free_block) += LEAF_SIZE; // Incrementa 2
         return;
     }
 
-    // Internal node logic
-    size_t pai_base_addr = *next_free_block;
-    *next_free_block += 1; 
-    size_t ponteiro_bloco_addr = *next_free_block;
-    *next_free_block += 8;
+    // --- B. SOU NÓ INTERNO (Escreve Ponteiros) ---
+    uint8_t mask = _get_child_mask(node);
+    if (mask == 0) return;
+
+    // 1. Escreve MEU Header
+    size_t header_pos = *next_free_block;
+    size_t header_byte = header_pos * 4;
     
-    _encode_pointer(ponteiro_bloco_addr, &texture[pai_base_addr * 4], tex_dim);
+    // Incrementa valor apontado (CORREÇÃO DE PRECEDÊNCIA)
+    (*next_free_block)++; 
+
+    // 2. Reserva espaço CONTÍGUO para os ponteiros dos filhos
+    int active_children_count = _count_set_bits(mask);
+    size_t pointers_start_idx = *next_free_block;
     
-    for (int i = 0; i < 8; ++i)
-    {
-        if (node->children[i])
-        {
-            // CRITICAL FIX: Check if child is empty before writing pointer
-            size_t child_size = _octree_texel_size(node->children[i]);
+    // Já avança o "cursor" global para depois dos meus ponteiros
+    // para que os filhos sejam escritos depois desta lista.
+    (*next_free_block) += active_children_count;
+
+    // Preenche o Header
+    // Codifica ponteiro para o INÍCIO da lista de filhos
+    // Nota: is_leaf_block no header geralmente não é útil se misturado, 
+    // deixamos false aqui e setamos nos ponteiros individuais.
+    _encode_pointer(pointers_start_idx, false, &texture[header_byte]);
+    texture[header_byte + 3] = mask; // Alpha = Máscara de filhos
+
+    // 3. Processa e Escreve Filhos Recursivamente
+    int current_ptr_offset = 0; // Indice LOCAL na lista de ponteiros (0 a 7 mas compactado)
+
+    for (int i = 0; i < 8; ++i) {
+        if ((mask >> i) & 1) {
+            // Onde este filho VAI ser escrito na textura (futuro)
+            size_t child_future_addr = *next_free_block;
             
-            if (child_size > 0) {
-                size_t filho_addr = *next_free_block;
-                size_t ptr_slot_base = (ponteiro_bloco_addr + i) * 4;
-                _encode_pointer(filho_addr, &texture[ptr_slot_base], tex_dim);
-                _transform_node_to_texture(node->children[i], texture, next_free_block, tex_dim);
-            } else {
-                // Child is empty, write null pointer
-                size_t ptr_slot_base = (ponteiro_bloco_addr + i) * 4;
-                _encode_pointer(0, &texture[ptr_slot_base], tex_dim);
-            }
-        }
-        else
-        {
-            size_t ptr_slot_base = (ponteiro_bloco_addr + i) * 4;
-            _encode_pointer(0, &texture[ptr_slot_base], tex_dim);
+            // Onde eu devo escrever o ponteiro AGORA
+            size_t ptr_slot_byte = (pointers_start_idx + current_ptr_offset) * 4;
+
+            // Verifica se ESSE filho específico é folha
+            bool child_is_leaf = (node->children[i]->children == NULL && 
+                      node->children[i]->has_voxel);
+
+            // Escreve o ponteiro na lista reservada
+            _encode_pointer(child_future_addr, child_is_leaf, &texture[ptr_slot_byte]);
+            
+            // Texture[ptr_slot_byte + 3] (Alpha do ponteiro) pode ser usado 
+            // para info extra se necessário, ou deixado 0.
+
+            // Recurso: Vai lá no final e escreve os dados do filho
+            _transform_node_to_texture(node->children[i], texture, next_free_block, tex_dim);
+            
+            current_ptr_offset++;
         }
     }
 }
@@ -583,14 +657,12 @@ void _transform_node_to_texture(Octree *node,
 uint8_t *octree_texture(Octree *tree, size_t *arr_size, size_t tex_dim) {
     if(!tree || !arr_size) return NULL;
     
-    // _octree_texel_size agora está correto
     size_t voxel_count = _octree_texel_size(tree); 
     if (voxel_count == 0) {
         *arr_size = 0;
         return NULL;
     }
     
-    // (Assumindo sizeof(ColorRGBA) == 4 bytes)
     *arr_size = voxel_count * 4; 
     
     uint8_t *texture = (uint8_t*)calloc(voxel_count * 4, sizeof(uint8_t));
@@ -599,6 +671,12 @@ uint8_t *octree_texture(Octree *tree, size_t *arr_size, size_t tex_dim) {
     size_t next_free_block = 0;
     
     _transform_node_to_texture(tree, texture, &next_free_block, tex_dim);
+    
+    // DEBUG: Verifica se usamos exatamente o espaço calculado
+    if (next_free_block != voxel_count) {
+        fprintf(stderr, "WARNING: Size mismatch! Calculated: %zu, Used: %zu\n", 
+                voxel_count, next_free_block);
+    }
 
     return texture;
 }
